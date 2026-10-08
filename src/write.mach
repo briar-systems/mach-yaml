@@ -107,7 +107,7 @@ fun put_hex(e: *Emit, c: u8) {
 }
 
 fun mark_of(n: *Node) Mark {
-    ret Mark{offset: 0, line: n.line, column: n.column};
+    ret Mark{offset: n.offset, line: n.line, column: n.column};
 }
 
 fun is_alnum(c: u8) bool {

@@ -200,6 +200,7 @@ fun sat_add(a: usize, b: usize) usize {
 fun place(n: *Node, at: Mark) {
     n.line   = at.line;
     n.column = at.column;
+    n.offset = at.offset;
 }
 
 fun empty_scalar(p: *Parser, at: Mark) res[*Node, Error] {
@@ -529,50 +530,17 @@ fun add_item(p: *Parser, seq: *Node, item: *Node, at: Mark) err[Error] {
 # a mapping key with the order it is checked in
 rec KeyRef {
     key:   *Node;
-    class: u8;
     index: usize;
 }
 
 val LINEAR_KEYS: usize = 16;
 
-# how the core schema tells scalar keys apart: by tag, or else by what the text reads as
-fun key_class(n: *Node) u8 {
-    if (n.tag_len > 0)         { ret 255; }
-    if (n.style == node.PLAIN) { ret core.plain_kind(n.text, n.text_len); }
-    ret core.STR;
-}
-
-fun compare_bytes(a: *u8, b: *u8, n: usize) i64 {
-    var i: usize = 0;
-    for (i < n) {
-        if (a[i] != b[i]) {
-            if (a[i] < b[i]) { ret -1; }
-            ret 1;
-        }
-        i = i + 1;
-    }
+fun compare_refs(a: *KeyRef, b: *KeyRef) i64 {
+    val keys: i64 = node.node_key_compare(a.key, b.key);
+    if (keys != 0)         { ret keys; }
+    if (a.index < b.index) { ret -1; }
+    if (a.index > b.index) { ret 1; }
     ret 0;
-}
-
-fun compare_usize(a: usize, b: usize) i64 {
-    if (a < b) { ret -1; }
-    if (a > b) { ret 1; }
-    ret 0;
-}
-
-fun compare_keys(a: *KeyRef, b: *KeyRef) i64 {
-    if (a.class != b.class)             { ret compare_usize(a.class::usize, b.class::usize); }
-    if (a.key.tag_len != b.key.tag_len) { ret compare_usize(a.key.tag_len, b.key.tag_len); }
-    val tags: i64 = compare_bytes(a.key.tag_text, b.key.tag_text, a.key.tag_len);
-    if (tags != 0)                        { ret tags; }
-    if (a.key.text_len != b.key.text_len) { ret compare_usize(a.key.text_len, b.key.text_len); }
-    val texts: i64 = compare_bytes(a.key.text, b.key.text, a.key.text_len);
-    if (texts != 0) { ret texts; }
-    ret compare_usize(a.index, b.index);
-}
-
-fun is_scalar_key(key: *Node) bool {
-    ret node.node_resolve(key).kind == node.SCALAR;
 }
 
 # the index of the first key that repeats an earlier one, or the count when none does
@@ -589,41 +557,21 @@ fun first_repeat_small(m: *Node) usize {
     ret m.count;
 }
 
-# the same for a large mapping: scalar keys by sorting, other keys pairwise
+# the same for a large mapping, by sorting every key and comparing neighbours
 fun first_repeat_large(p: *Parser, m: *Node, at: Mark) res[usize, Error] {
-    var best: usize = m.count;
-
-    var i: usize = 1;
-    for (i < best) {
-        if (!is_scalar_key(m.items[i * 2])) {
-            var j: usize = 0;
-            for (j < i) {
-                if (!is_scalar_key(m.items[j * 2]) && node.node_key_equal(m.items[j * 2], m.items[i * 2])) {
-                    best = i;
-                    brk;
-                }
-                j = j + 1;
-            }
-        }
-        i = i + 1;
-    }
-
     val got: res[*KeyRef, allocator.Error] = allocator.allocate[KeyRef](p.alloc, m.count);
     if (sel got.err) { ret res[usize, Error].err{refused(p, got.err, at)}; }
     val refs: *KeyRef = got.ok;
-    var n:    usize   = 0;
-    i = 0;
+    var i:    usize   = 0;
     for (i < m.count) {
-        if (is_scalar_key(m.items[i * 2])) {
-            val resolved: *Node = node.node_resolve(m.items[i * 2]);
-            refs[n] = KeyRef{key: resolved, class: key_class(resolved), index: i};
-            n       = n + 1;
-        }
-        i = i + 1;
+        refs[i] = KeyRef{key: m.items[i * 2], index: i};
+        i       = i + 1;
     }
-    sort.sort_by[KeyRef](refs, n, compare_keys);
+    sort.sort_by[KeyRef](refs, m.count, compare_refs);
+
+    var best: usize = m.count;
     i = 1;
-    for (i < n) {
+    for (i < m.count) {
         if (refs[i].index < best && node.node_key_equal(refs[i - 1].key, refs[i].key)) { best = refs[i].index; }
         i = i + 1;
     }
@@ -643,7 +591,7 @@ fun check_unique(p: *Parser, m: *Node, at: Mark) err[Error] {
     }
     if (repeat >= m.count) { ret pass(); }
     val key: *Node = m.items[repeat * 2];
-    ret fail(Error.duplicate_key{Mark{offset: 0, line: key.line, column: key.column}});
+    ret fail(Error.duplicate_key{Mark{offset: key.offset, line: key.line, column: key.column}});
 }
 
 fun add_pair(p: *Parser, map_node: *Node, key: *Node, value: *Node, at: Mark) err[Error] {

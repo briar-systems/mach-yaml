@@ -37,6 +37,8 @@ pub rec Node {
     style:  Style;
     line:   usize;
     column: usize;
+    # the byte offset the node starts at, 0 for a node built in memory
+    offset: usize;
     # the resolved tag, nil when there is none
     tag_text:   *u8;
     tag_len:    usize;
@@ -341,7 +343,6 @@ fun style_is_plain(s: Style) bool {
     ret s == PLAIN;
 }
 
-# whether two trees mean the same
 # a plain scalar and a quoted one read alike when a tag decides, or when the plain text is a string either way
 fun plainness_moot(a: *Node, b: *Node) bool {
     if (a.tag_len > 0) { ret true; }
@@ -354,12 +355,19 @@ fun same_bytes(a: *u8, b: *u8, n: usize) bool {
     ret raw_equal(a::ptr, b::ptr, n);
 }
 
-fun equal_with(a: *Node, b: *Node, anchors: bool) bool {
-    if (a.kind != b.kind)                                                                           { ret false; }
-    if (a.tag_len != b.tag_len || !same_bytes(a.tag_text, b.tag_text, a.tag_len))                   { ret false; }
-    if (anchors && (a.anchor_len != b.anchor_len || !same_bytes(a.anchor, b.anchor, a.anchor_len))) { ret false; }
+# whether two trees mean the same, down to their anchors
+#
+# an alias equals another when its target has the same anchor name, since the
+# anchored node is compared where it is defined
+pub fun node_equal(a: *Node, b: *Node) bool {
+    if (a.kind != b.kind)                                                              { ret false; }
+    if (a.tag_len != b.tag_len || !same_bytes(a.tag_text, b.tag_text, a.tag_len))      { ret false; }
+    if (a.anchor_len != b.anchor_len || !same_bytes(a.anchor, b.anchor, a.anchor_len)) { ret false; }
 
-    if (a.kind == ALIAS) { ret true; }
+    if (a.kind == ALIAS) {
+        if (a.target.anchor_len != b.target.anchor_len) { ret false; }
+        ret same_bytes(a.target.anchor, b.target.anchor, a.target.anchor_len);
+    }
     if (a.kind == SCALAR) {
         if (style_is_plain(a.style) != style_is_plain(b.style) && !plainness_moot(a, b)) { ret false; }
         if (a.text_len != b.text_len)                                                    { ret false; }
@@ -370,20 +378,75 @@ fun equal_with(a: *Node, b: *Node, anchors: bool) bool {
     var i: usize = 0;
     for (i < a.count) {
         if (a.kind == MAPPING) {
-            if (!equal_with(a.items[i * 2], b.items[i * 2], anchors)) { ret false; }
+            if (!node_equal(a.items[i * 2], b.items[i * 2])) { ret false; }
         }
-        if (!equal_with(node_value(a, i), node_value(b, i), anchors)) { ret false; }
+        if (!node_equal(node_value(a, i), node_value(b, i))) { ret false; }
         i = i + 1;
     }
     ret true;
 }
 
-# whether two trees mean the same, down to their anchors
-pub fun node_equal(a: *Node, b: *Node) bool {
-    ret equal_with(a, b, true);
+fun compare_size(a: usize, b: usize) i64 {
+    if (a < b) { ret -1; }
+    if (a > b) { ret 1; }
+    ret 0;
 }
 
-# whether two nodes are the same mapping key: equal as node_equal, anchors aside, through an alias
+fun compare_bytes(a: *u8, b: *u8, n: usize) i64 {
+    var i: usize = 0;
+    for (i < n) {
+        if (a[i] != b[i]) { ret compare_size(a[i]::usize, b[i]::usize); }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+# how the core schema tells scalars apart: by tag, or else by what the plain text reads as
+fun key_class(n: *Node) u8 {
+    if (n.tag_len > 0)    { ret 255; }
+    if (n.style == PLAIN) { ret core.plain_kind(n.text, n.text_len); }
+    ret core.STR;
+}
+
+# a total order over mapping keys, zero exactly when two keys are the same key
+#
+# aliases are followed to their targets, and anchors and presentation do not
+# count. kind comes first, then the tag, then a scalar's core reading and text,
+# or the items of a sequence and the key and value pairs of a mapping in
+# document order, then their number.
+pub fun node_key_compare(a0: *Node, b0: *Node) i64 {
+    val a: *Node = node_resolve(a0);
+    val b: *Node = node_resolve(b0);
+    if (a == b)                 { ret 0; }
+    if (a.kind != b.kind)       { ret compare_size(a.kind::usize, b.kind::usize); }
+    if (a.tag_len != b.tag_len) { ret compare_size(a.tag_len, b.tag_len); }
+    val tags: i64 = compare_bytes(a.tag_text, b.tag_text, a.tag_len);
+    if (tags != 0) { ret tags; }
+
+    if (a.kind == SCALAR) {
+        val ca: u8 = key_class(a);
+        val cb: u8 = key_class(b);
+        if (ca != cb)                 { ret compare_size(ca::usize, cb::usize); }
+        if (a.text_len != b.text_len) { ret compare_size(a.text_len, b.text_len); }
+        ret compare_bytes(a.text, b.text, a.text_len);
+    }
+
+    var shared: usize = a.count;
+    if (b.count < shared) { shared = b.count; }
+    var i: usize = 0;
+    for (i < shared) {
+        if (a.kind == MAPPING) {
+            val k: i64 = node_key_compare(a.items[i * 2], b.items[i * 2]);
+            if (k != 0) { ret k; }
+        }
+        val v: i64 = node_key_compare(node_value(a, i), node_value(b, i));
+        if (v != 0) { ret v; }
+        i = i + 1;
+    }
+    ret compare_size(a.count, b.count);
+}
+
+# whether two nodes are the same mapping key
 pub fun node_key_equal(a: *Node, b: *Node) bool {
-    ret equal_with(node_resolve(a), node_resolve(b), false);
+    ret node_key_compare(a, b) == 0;
 }
