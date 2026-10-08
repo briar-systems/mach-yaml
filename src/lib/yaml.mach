@@ -5,6 +5,7 @@
 # the startup a test dispatcher of this library links
 use std.runtime;
 
+fwd yaml.core;
 fwd yaml.error;
 fwd yaml.node;
 fwd yaml.scan;
