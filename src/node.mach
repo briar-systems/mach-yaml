@@ -1,0 +1,452 @@
+# the tree a read produces and the writer takes
+
+use std.allocator;
+use std.memory.raw_copy;
+use std.memory.raw_equal;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_len;
+
+use yaml.core;
+
+pub def Kind: u8;
+pub val SCALAR:   Kind = 0;
+pub val SEQUENCE: Kind = 1;
+pub val MAPPING:  Kind = 2;
+pub val ALIAS:    Kind = 3;
+
+# how a node was written, or how it is to be written
+pub def Style: u8;
+pub val PLAIN:   Style = 0;
+pub val SINGLE:  Style = 1;
+pub val DOUBLE:  Style = 2;
+pub val LITERAL: Style = 3;
+pub val FOLDED:  Style = 4;
+pub val BLOCK:   Style = 5;
+pub val FLOW:    Style = 6;
+
+# a node of a YAML tree
+pub rec Node {
+    kind:   Kind;
+    style:  Style;
+    line:   usize;
+    column: usize;
+    # the byte offset the node starts at, 0 for a node built in memory
+    offset: usize;
+    # the resolved tag, nil when there is none
+    tag_text:   *u8;
+    tag_len:    usize;
+    anchor:     *u8;
+    anchor_len: usize;
+    # the decoded text of a scalar, null-terminated one past text_len
+    text:     *u8;
+    text_len: usize;
+    # the items of a sequence, or the key then the value of each pair of a mapping
+    items: **Node;
+    count: usize;
+    cap:   usize;
+    # the anchored node an alias names, not owned
+    target: *Node;
+    # how many nodes this is with every alias expanded, saturating
+    weight: usize;
+}
+
+# a copy of len bytes made on the heap, null-terminated
+pub fun own_copy(alloc: *allocator.Allocator, src: *u8, len: usize) res[*u8, allocator.Error] {
+    val got: res[*u8, allocator.Error] = allocator.allocate[u8](alloc, len + 1);
+    if (sel got.err) { ret got; }
+    val dst: *u8 = got.ok;
+    if (len > 0) { raw_copy(dst::ptr, src::ptr, len); }
+    dst[len] = 0;
+    ret res[*u8, allocator.Error].ok{dst};
+}
+
+# release a string made by own_copy
+pub fun own_free(alloc: *allocator.Allocator, p: *u8, len: usize) err[allocator.Error] {
+    if (p == nil) { ret err[allocator.Error].ok{}; }
+    ret allocator.deallocate[u8](alloc, p, len + 1);
+}
+
+# allocate a node of a kind, with no text, tag, anchor or children
+pub fun new_node(alloc: *allocator.Allocator, kind: Kind) res[*Node, allocator.Error] {
+    val got: res[*Node, allocator.Error] = allocator.zallocate[Node](alloc, 1);
+    if (sel got.err) { ret got; }
+    val n: *Node = got.ok;
+    n.kind   = kind;
+    n.weight = 1;
+    ret res[*Node, allocator.Error].ok{n};
+}
+
+# a scalar holding a copy of len bytes of text
+pub fun make_scalar(alloc: *allocator.Allocator, text: *u8, len: usize, style: Style) res[*Node, allocator.Error] {
+    val copy: res[*u8, allocator.Error] = own_copy(alloc, text, len);
+    if (sel copy.err) { ret res[*Node, allocator.Error].err{copy.err}; }
+    val made: res[*Node, allocator.Error] = new_node(alloc, SCALAR);
+    if (sel made.err) {
+        own_free(alloc, copy.ok, len);
+        ret made;
+    }
+    val n: *Node = made.ok;
+    n.text     = copy.ok;
+    n.text_len = len;
+    n.style    = style;
+    ret made;
+}
+
+# an empty sequence
+pub fun make_sequence(alloc: *allocator.Allocator) res[*Node, allocator.Error] {
+    val made: res[*Node, allocator.Error] = new_node(alloc, SEQUENCE);
+    if (sel made.err) { ret made; }
+    made.ok.style = BLOCK;
+    ret made;
+}
+
+# an empty mapping
+pub fun make_mapping(alloc: *allocator.Allocator) res[*Node, allocator.Error] {
+    val made: res[*Node, allocator.Error] = new_node(alloc, MAPPING);
+    if (sel made.err) { ret made; }
+    made.ok.style = BLOCK;
+    ret made;
+}
+
+# an alias of a node, which must carry an anchor for the writer to name
+pub fun make_alias(alloc: *allocator.Allocator, target: *Node) res[*Node, allocator.Error] {
+    val made: res[*Node, allocator.Error] = new_node(alloc, ALIAS);
+    if (sel made.err) { ret made; }
+    made.ok.target = target;
+    made.ok.weight = target.weight;
+    ret made;
+}
+
+fun add_weight(a: usize, b: usize) usize {
+    val sum: usize = a + b;
+    if (sum < a) { ret 0 - 1; }
+    ret sum;
+}
+
+fun stride(n: *Node) usize {
+    if (n.kind == MAPPING) { ret 2; }
+    ret 1;
+}
+
+fun grow(alloc: *allocator.Allocator, n: *Node) res[usize, allocator.Error] {
+    if (n.count < n.cap) { ret res[usize, allocator.Error].ok{n.cap}; }
+    var next: usize = n.cap * 2;
+    if (next == 0) { next = 4; }
+
+    val width: usize                        = stride(n);
+    val items: res[**Node, allocator.Error] = allocator.reallocate[*Node](alloc, n.items, n.cap * width, next * width);
+    if (sel items.err) { ret res[usize, allocator.Error].err{items.err}; }
+    n.items = items.ok;
+    n.cap   = next;
+    ret res[usize, allocator.Error].ok{next};
+}
+
+# append an item to a sequence, taking ownership of it
+pub fun push_item(alloc: *allocator.Allocator, seq: *Node, item: *Node) err[allocator.Error] {
+    val room: res[usize, allocator.Error] = grow(alloc, seq);
+    if (sel room.err) { ret err[allocator.Error].err{room.err}; }
+    seq.items[seq.count] = item;
+    seq.count            = seq.count + 1;
+    seq.weight           = add_weight(seq.weight, item.weight);
+    ret err[allocator.Error].ok{};
+}
+
+# append a key and value pair to a mapping, taking ownership of both
+pub fun push_pair(alloc: *allocator.Allocator, map: *Node, key: *Node, value: *Node) err[allocator.Error] {
+    val room: res[usize, allocator.Error] = grow(alloc, map);
+    if (sel room.err) { ret err[allocator.Error].err{room.err}; }
+    map.items[map.count * 2]     = key;
+    map.items[map.count * 2 + 1] = value;
+    map.count                    = map.count + 1;
+    map.weight                   = add_weight(add_weight(map.weight, key.weight), value.weight);
+    ret err[allocator.Error].ok{};
+}
+
+# give a node a tag, replacing any it had
+pub fun set_tag(alloc: *allocator.Allocator, n: *Node, tag: str) err[allocator.Error] {
+    val len:  usize                     = str_len(tag);
+    val copy: res[*u8, allocator.Error] = own_copy(alloc, tag, len);
+    if (sel copy.err) { ret err[allocator.Error].err{copy.err}; }
+    own_free(alloc, n.tag_text, n.tag_len);
+    n.tag_text = copy.ok;
+    n.tag_len  = len;
+    ret err[allocator.Error].ok{};
+}
+
+# give a node an anchor name, replacing any it had
+pub fun set_anchor(alloc: *allocator.Allocator, n: *Node, name: str) err[allocator.Error] {
+    val len:  usize                     = str_len(name);
+    val copy: res[*u8, allocator.Error] = own_copy(alloc, name, len);
+    if (sel copy.err) { ret err[allocator.Error].err{copy.err}; }
+    own_free(alloc, n.anchor, n.anchor_len);
+    n.anchor     = copy.ok;
+    n.anchor_len = len;
+    ret err[allocator.Error].ok{};
+}
+
+# release a node and everything it owns
+pub fun dnit(alloc: *allocator.Allocator, n: *Node) err[allocator.Error] {
+    if (n == nil) { ret err[allocator.Error].ok{}; }
+    var failed: bool = false;
+    var cause:  allocator.Error;
+
+    val width: usize = stride(n);
+    var i:     usize = 0;
+    for (i < n.count * width) {
+        val c: err[allocator.Error] = dnit(alloc, n.items[i]);
+        if (sel c.err) {
+            if (!failed) {
+                failed = true;
+                cause  = c.err;
+            }
+        }
+        i = i + 1;
+    }
+
+    val freed: [4]err[allocator.Error] = [4]err[allocator.Error]{
+        allocator.deallocate[*Node](alloc, n.items, n.cap * width),
+        own_free(alloc, n.text, n.text_len),
+        own_free(alloc, n.tag_text, n.tag_len),
+        own_free(alloc, n.anchor, n.anchor_len)
+    };
+    i = 0;
+    for (i < 4) {
+        if (sel freed[i].err) {
+            if (!failed) {
+                failed = true;
+                cause  = freed[i].err;
+            }
+        }
+        i = i + 1;
+    }
+
+    val self: err[allocator.Error] = allocator.deallocate[Node](alloc, n, 1);
+    if (sel self.err) {
+        if (!failed) {
+            failed = true;
+            cause  = self.err;
+        }
+    }
+    if (failed) { ret err[allocator.Error].err{cause}; }
+    ret err[allocator.Error].ok{};
+}
+
+pub fun node_is_scalar(n: *Node) bool {
+    ret n.kind == SCALAR;
+}
+
+pub fun node_is_sequence(n: *Node) bool {
+    ret n.kind == SEQUENCE;
+}
+
+pub fun node_is_mapping(n: *Node) bool {
+    ret n.kind == MAPPING;
+}
+
+pub fun node_is_alias(n: *Node) bool {
+    ret n.kind == ALIAS;
+}
+
+# the node an alias names, or the node itself when it is not an alias
+pub fun node_resolve(n: *Node) *Node {
+    if (n.kind == ALIAS) { ret n.target; }
+    ret n;
+}
+
+# the style a node was written in
+pub fun node_style(n: *Node) Style {
+    ret n.style;
+}
+
+# the number of items of a sequence or pairs of a mapping, 0 for the rest
+pub fun node_count(n: *Node) usize {
+    ret n.count;
+}
+
+# a sequence item or a mapping value by index
+pub fun node_get(n: *Node, index: usize) opt[*Node] {
+    if (index >= n.count) { ret opt[*Node].none{}; }
+    ret opt[*Node].some{node_value(n, index)};
+}
+
+fun node_value(n: *Node, index: usize) *Node {
+    ret n.items[index * stride(n) + stride(n) - 1];
+}
+
+# a mapping key node by index
+pub fun node_key(n: *Node, index: usize) opt[*Node] {
+    if (n.kind != MAPPING || index >= n.count) { ret opt[*Node].none{}; }
+    ret opt[*Node].some{n.items[index * 2]};
+}
+
+# the text of a scalar, null-terminated
+pub fun node_text(n: *Node, len: *usize) str {
+    @len = n.text_len;
+    if (n.text == nil) { ret ""; }
+    ret n.text;
+}
+
+# the resolved tag of a node, empty when it has none
+pub fun node_tag(n: *Node) str {
+    if (n.tag_text == nil) { ret ""; }
+    ret n.tag_text;
+}
+
+# whether the node carries exactly this resolved tag
+pub fun node_tag_is(n: *Node, tag: str) bool {
+    ret bytes_equal(node_tag(n), n.tag_len, tag);
+}
+
+# the anchor name of a node, empty when it has none
+pub fun node_anchor(n: *Node) str {
+    if (n.anchor == nil) { ret ""; }
+    ret n.anchor;
+}
+
+# whether len bytes at a are exactly the null-terminated b
+pub fun bytes_equal(a: *u8, len: usize, b: str) bool {
+    var i: usize = 0;
+    for (i < len) {
+        if (b[i] == 0 || a[i] != b[i]) { ret false; }
+        i = i + 1;
+    }
+    ret b[len] == 0;
+}
+
+# whether a scalar node has exactly this text
+pub fun node_text_is(n: *Node, text: str) bool {
+    if (n.kind != SCALAR) { ret false; }
+    ret bytes_equal(node_text(n, ?n.text_len), n.text_len, text);
+}
+
+# the value under a scalar key of a mapping, searching linearly
+pub fun node_find(n: *Node, key: str) opt[*Node] {
+    if (n.kind != MAPPING || key == nil) { ret opt[*Node].none{}; }
+    var i: usize = 0;
+    for (i < n.count) {
+        if (node_text_is(node_resolve(n.items[i * 2]), key)) {
+            ret opt[*Node].some{n.items[i * 2 + 1]};
+        }
+        i = i + 1;
+    }
+    ret opt[*Node].none{};
+}
+
+fun style_is_plain(s: Style) bool {
+    ret s == PLAIN;
+}
+
+# a plain scalar and a quoted one read alike when a tag decides, or when the plain text is a string either way
+fun plainness_moot(a: *Node, b: *Node) bool {
+    if (a.tag_len > 0) { ret true; }
+    var plain: *Node = b;
+    if (style_is_plain(a.style)) { plain = a; }
+    ret core.plain_kind(plain.text, plain.text_len) == core.STR;
+}
+
+fun same_bytes(a: *u8, b: *u8, n: usize) bool {
+    ret raw_equal(a::ptr, b::ptr, n);
+}
+
+# whether two trees mean the same, down to their anchors
+#
+# an alias equals another when its target has the same anchor name, since the
+# anchored node is compared where it is defined
+pub fun node_equal(a: *Node, b: *Node) bool {
+    if (a.kind != b.kind)                                                              { ret false; }
+    if (a.tag_len != b.tag_len || !same_bytes(a.tag_text, b.tag_text, a.tag_len))      { ret false; }
+    if (a.anchor_len != b.anchor_len || !same_bytes(a.anchor, b.anchor, a.anchor_len)) { ret false; }
+
+    if (a.kind == ALIAS) {
+        if (a.target.anchor_len != b.target.anchor_len) { ret false; }
+        ret same_bytes(a.target.anchor, b.target.anchor, a.target.anchor_len);
+    }
+    if (a.kind == SCALAR) {
+        if (style_is_plain(a.style) != style_is_plain(b.style) && !plainness_moot(a, b)) { ret false; }
+        if (a.text_len != b.text_len)                                                    { ret false; }
+        ret same_bytes(a.text, b.text, a.text_len);
+    }
+
+    if (a.count != b.count) { ret false; }
+    var i: usize = 0;
+    for (i < a.count) {
+        if (a.kind == MAPPING) {
+            if (!node_equal(a.items[i * 2], b.items[i * 2])) { ret false; }
+        }
+        if (!node_equal(node_value(a, i), node_value(b, i))) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun compare_size(a: usize, b: usize) i64 {
+    if (a < b) { ret -1; }
+    if (a > b) { ret 1; }
+    ret 0;
+}
+
+fun compare_bytes(a: *u8, b: *u8, n: usize) i64 {
+    var i: usize = 0;
+    for (i < n) {
+        if (a[i] != b[i]) { ret compare_size(a[i]::usize, b[i]::usize); }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+# how the core schema tells scalars apart: by tag, or else by what the plain text reads as
+fun key_class(n: *Node) u8 {
+    if (n.tag_len > 0)    { ret 255; }
+    if (n.style == PLAIN) { ret core.plain_kind(n.text, n.text_len); }
+    ret core.STR;
+}
+
+# a total order over mapping keys, zero exactly when two keys are the same key
+#
+# aliases are followed to their targets, and anchors and presentation do not
+# count. kind comes first, then the tag, then a scalar's core reading and text,
+# or the items of a sequence and the key and value pairs of a mapping in
+# document order, then their number.
+pub fun node_key_compare(a0: *Node, b0: *Node) i64 {
+    val a: *Node = node_resolve(a0);
+    val b: *Node = node_resolve(b0);
+    if (a == b)                 { ret 0; }
+    if (a.kind != b.kind)       { ret compare_size(a.kind::usize, b.kind::usize); }
+    if (a.tag_len != b.tag_len) { ret compare_size(a.tag_len, b.tag_len); }
+    val tags: i64 = compare_bytes(a.tag_text, b.tag_text, a.tag_len);
+    if (tags != 0) { ret tags; }
+
+    if (a.kind == SCALAR) {
+        val ca: u8 = key_class(a);
+        val cb: u8 = key_class(b);
+        if (ca != cb)                 { ret compare_size(ca::usize, cb::usize); }
+        if (a.text_len != b.text_len) { ret compare_size(a.text_len, b.text_len); }
+        ret compare_bytes(a.text, b.text, a.text_len);
+    }
+
+    var shared: usize = a.count;
+    if (b.count < shared) { shared = b.count; }
+    var i: usize = 0;
+    for (i < shared) {
+        if (a.kind == MAPPING) {
+            val k: i64 = node_key_compare(a.items[i * 2], b.items[i * 2]);
+            if (k != 0) { ret k; }
+        }
+        val v: i64 = node_key_compare(node_value(a, i), node_value(b, i));
+        if (v != 0) { ret v; }
+        i = i + 1;
+    }
+    ret compare_size(a.count, b.count);
+}
+
+# whether two nodes are the same mapping key
+pub fun node_key_equal(a: *Node, b: *Node) bool {
+    ret node_key_compare(a, b) == 0;
+}

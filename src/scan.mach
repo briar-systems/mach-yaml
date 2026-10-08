@@ -1,0 +1,1391 @@
+# the tokenizer under the reader
+
+use std.allocator;
+use std.system.capability;
+use std.text.utf8;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+
+use vec: std.collections.vector;
+use yaml.error;
+use yaml.error.Error;
+use yaml.error.Limits;
+use yaml.error.Mark;
+use yaml.error.Refusal;
+use yaml.node;
+use yaml.node.Style;
+
+pub def TokenKind: u8;
+pub val TOK_STREAM_END:    TokenKind = 0;
+pub val TOK_DOC_START:     TokenKind = 1;
+pub val TOK_DOC_END:       TokenKind = 2;
+pub val TOK_VERSION:       TokenKind = 3;
+pub val TOK_TAG_DIRECTIVE: TokenKind = 4;
+pub val TOK_BLOCK_SEQ:     TokenKind = 5;
+pub val TOK_BLOCK_MAP:     TokenKind = 6;
+pub val TOK_BLOCK_END:     TokenKind = 7;
+pub val TOK_FLOW_SEQ:      TokenKind = 8;
+pub val TOK_FLOW_SEQ_END:  TokenKind = 9;
+pub val TOK_FLOW_MAP:      TokenKind = 10;
+pub val TOK_FLOW_MAP_END:  TokenKind = 11;
+pub val TOK_BLOCK_ENTRY:   TokenKind = 12;
+pub val TOK_FLOW_ENTRY:    TokenKind = 13;
+pub val TOK_KEY:           TokenKind = 14;
+pub val TOK_VALUE:         TokenKind = 15;
+pub val TOK_ALIAS:         TokenKind = 16;
+pub val TOK_ANCHOR:        TokenKind = 17;
+pub val TOK_TAG:           TokenKind = 18;
+pub val TOK_SCALAR:        TokenKind = 19;
+
+# a token, owning its strings until the reader takes them
+pub rec Token {
+    kind:      TokenKind;
+    style:     Style;
+    mark:      Mark;
+    text:      *u8;
+    text_len:  usize;
+    text2:     *u8;
+    text2_len: usize;
+}
+
+rec SimpleKey {
+    possible: bool;
+    required: bool;
+    number:   usize;
+    col:      usize;
+    mark:     Mark;
+}
+
+# the scanner state, made by init and released by dnit
+pub rec Scanner {
+    alloc:   *allocator.Allocator;
+    src:     *u8;
+    len:     usize;
+    pos:     usize;
+    line:    usize;
+    col:     usize;
+    limits:  Limits;
+    queue:   vec.Vector[Token];
+    head:    usize;
+    parsed:  usize;
+    indent:  i64;
+    indents: vec.Vector[i64];
+    keys:    vec.Vector[SimpleKey];
+    flow:    usize;
+    allowed: bool;
+    started: bool;
+    done:    bool;
+    bad:     bool;
+    bad_at:  Mark;
+    cont:    usize;
+}
+
+rec Buf {
+    data: *u8;
+    len:  usize;
+    cap:  usize;
+}
+
+# make a scanner over len bytes of text, which must outlive it
+pub fun init(s: *Scanner, src: *u8, len: usize, alloc: *allocator.Allocator, limits: Limits) err[allocator.Error] {
+    s.alloc   = alloc;
+    s.src     = src;
+    s.len     = len;
+    s.pos     = 0;
+    s.line    = 1;
+    s.col     = 0;
+    s.limits  = limits;
+    s.queue   = vec.init[Token](alloc);
+    s.head    = 0;
+    s.parsed  = 0;
+    s.indent  = -1;
+    s.indents = vec.init[i64](alloc);
+    s.keys    = vec.init[SimpleKey](alloc);
+    s.flow    = 0;
+    s.allowed = true;
+    s.started = false;
+    s.done    = false;
+    s.bad     = false;
+    s.cont    = 0;
+
+    var base:   SimpleKey;
+    val pushed: res[usize, allocator.Error] = vec.push[SimpleKey](?s.keys, base);
+    if (sel pushed.err) { ret err[allocator.Error].err{pushed.err}; }
+    ret err[allocator.Error].ok{};
+}
+
+# release the scanner and the strings of tokens nobody took
+pub fun dnit(s: *Scanner) err[allocator.Error] {
+    var failed: bool = false;
+    var cause:  allocator.Error;
+
+    var i: usize = 0;
+    for (i < s.queue.len) {
+        val freed: err[allocator.Error] = token_free(s.alloc, ?s.queue.data[i]);
+        if (sel freed.err) {
+            if (!failed) {
+                failed = true;
+                cause  = freed.err;
+            }
+        }
+        i = i + 1;
+    }
+    val q: err[allocator.Error] = vec.dnit[Token](?s.queue);
+    if (sel q.err) {
+        if (!failed) {
+            failed = true;
+            cause  = q.err;
+        }
+    }
+    val n: err[allocator.Error] = vec.dnit[i64](?s.indents);
+    if (sel n.err) {
+        if (!failed) {
+            failed = true;
+            cause  = n.err;
+        }
+    }
+    val k: err[allocator.Error] = vec.dnit[SimpleKey](?s.keys);
+    if (sel k.err) {
+        if (!failed) {
+            failed = true;
+            cause  = k.err;
+        }
+    }
+    if (failed) { ret err[allocator.Error].err{cause}; }
+    ret err[allocator.Error].ok{};
+}
+
+# release the strings a token still owns
+pub fun token_free(alloc: *allocator.Allocator, t: *Token) err[allocator.Error] {
+    val a: err[allocator.Error] = node.own_free(alloc, t.text, t.text_len);
+    val b: err[allocator.Error] = node.own_free(alloc, t.text2, t.text2_len);
+    t.text      = nil;
+    t.text_len  = 0;
+    t.text2     = nil;
+    t.text2_len = 0;
+    if (sel a.err) { ret a; }
+    ret b;
+}
+
+fun here(s: *Scanner) Mark {
+    ret Mark{offset: s.pos, line: s.line, column: s.col + 1};
+}
+
+fun refused(s: *Scanner, cause: allocator.Error) Error {
+    ret Error.alloc{Refusal{cause: cause, at: here(s)}};
+}
+
+fun fail(e: Error) err[Error] {
+    ret err[Error].err{e};
+}
+
+fun pass() err[Error] {
+    ret err[Error].ok{};
+}
+
+fun at_end(s: *Scanner, k: usize) bool {
+    ret s.pos + k >= s.len;
+}
+
+fun peek_at(s: *Scanner, k: usize) u8 {
+    if (s.pos + k >= s.len) { ret 0; }
+    ret s.src[s.pos + k];
+}
+
+fun is_break_byte(c: u8) bool {
+    ret c == '\n' || c == '\r';
+}
+
+fun is_blank_byte(c: u8) bool {
+    ret c == ' ' || c == '\t';
+}
+
+fun is_blank_at(s: *Scanner, k: usize) bool {
+    ret !at_end(s, k) && is_blank_byte(s.src[s.pos + k]);
+}
+
+fun is_break_at(s: *Scanner, k: usize) bool {
+    ret !at_end(s, k) && is_break_byte(s.src[s.pos + k]);
+}
+
+fun is_blankz_at(s: *Scanner, k: usize) bool {
+    ret at_end(s, k) || is_blank_byte(s.src[s.pos + k]) || is_break_byte(s.src[s.pos + k]);
+}
+
+fun is_breakz_at(s: *Scanner, k: usize) bool {
+    ret at_end(s, k) || is_break_byte(s.src[s.pos + k]);
+}
+
+fun is_flow_indicator(c: u8) bool {
+    ret c == ',' || c == '[' || c == ']' || c == '{' || c == '}';
+}
+
+fun is_alnum(c: u8) bool {
+    ret (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+fun hex_value(c: u8) i64 {
+    if (c >= '0' && c <= '9') { ret (c - '0')::i64; }
+    if (c >= 'a' && c <= 'f') { ret (c - 'a')::i64 + 10; }
+    if (c >= 'A' && c <= 'F') { ret (c - 'A')::i64 + 10; }
+    ret -1;
+}
+
+# a byte that may appear in a stream, outside the line breaks
+fun printable(c: u8) bool {
+    if (c == '\t') { ret true; }
+    ret c >= 0x20 && c != 0x7f;
+}
+
+# note the first malformed UTF-8 sequence consumed, found at its lead byte
+fun check_utf8(s: *Scanner, c: u8) {
+    if (s.cont > 0) {
+        s.cont = s.cont - 1;
+        ret;
+    }
+    var cp: utf8.Codepoint;
+    val n:  usize = utf8.decode(?s.src[s.pos], s.len - s.pos, ?cp);
+    if (n > 0) {
+        s.cont = n - 1;
+        ret;
+    }
+    if (!s.bad) {
+        s.bad    = true;
+        s.bad_at = here(s);
+    }
+}
+
+# consume one byte, keeping the line and column
+fun skip(s: *Scanner) {
+    val c: u8 = s.src[s.pos];
+    if (c >= 0x80) { check_utf8(s, c); }
+    if (c == '\n') {
+        s.line = s.line + 1;
+        s.col  = 0;
+    }
+    or (c == '\r') {
+        if (peek_at(s, 1) == '\n') { s.pos = s.pos + 1; }
+        s.line = s.line + 1;
+        s.col  = 0;
+    }
+    or (c < 0x80 || c >= 0xC0) {
+        s.col = s.col + 1;
+    }
+    s.pos = s.pos + 1;
+}
+
+fun skip_n(s: *Scanner, n: usize) {
+    var i: usize = 0;
+    for (i < n) {
+        skip(s);
+        i = i + 1;
+    }
+}
+
+fun buf_put(s: *Scanner, b: *Buf, c: u8) err[Error] {
+    if (b.len + 1 >= b.cap) {
+        var next: usize = b.cap * 2;
+        if (next == 0) { next = 32; }
+        val grown: res[*u8, allocator.Error] = allocator.reallocate[u8](s.alloc, b.data, b.cap, next);
+        if (sel grown.err) { ret fail(refused(s, grown.err)); }
+        b.data = grown.ok;
+        b.cap  = next;
+    }
+    b.data[b.len] = c;
+    b.len         = b.len + 1;
+    ret pass();
+}
+
+fun buf_repeat(s: *Scanner, b: *Buf, c: u8, n: usize) err[Error] {
+    var i: usize = 0;
+    for (i < n) {
+        val put: err[Error] = buf_put(s, b, c);
+        if (sel put.err) { ret put; }
+        i = i + 1;
+    }
+    ret pass();
+}
+
+fun buf_put_cp(s: *Scanner, b: *Buf, cp: utf8.Codepoint) err[Error] {
+    var enc: [4]u8;
+    val n:   usize = utf8.encode(cp, ?enc[0], 4);
+    var i:   usize = 0;
+    for (i < n) {
+        val put: err[Error] = buf_put(s, b, enc[i]);
+        if (sel put.err) { ret put; }
+        i = i + 1;
+    }
+    ret pass();
+}
+
+# copy len source bytes starting at start
+fun buf_put_src(s: *Scanner, b: *Buf, start: usize, len: usize) err[Error] {
+    var i: usize = 0;
+    for (i < len) {
+        val put: err[Error] = buf_put(s, b, s.src[start + i]);
+        if (sel put.err) { ret put; }
+        i = i + 1;
+    }
+    ret pass();
+}
+
+fun buf_free(s: *Scanner, b: *Buf) {
+    allocator.deallocate[u8](s.alloc, b.data, b.cap);
+    b.data = nil;
+    b.len  = 0;
+    b.cap  = 0;
+}
+
+# the buffer as an exactly sized null-terminated string, owned by the caller
+fun buf_finish(s: *Scanner, b: *Buf) res[*u8, Error] {
+    var out: *u8;
+    if (b.cap == 0) {
+        val got: res[*u8, allocator.Error] = allocator.allocate[u8](s.alloc, 1);
+        if (sel got.err) { ret res[*u8, Error].err{refused(s, got.err)}; }
+        out = got.ok;
+    }
+    or {
+        val got: res[*u8, allocator.Error] = allocator.reallocate[u8](s.alloc, b.data, b.cap, b.len + 1);
+        if (sel got.err) {
+            buf_free(s, b);
+            ret res[*u8, Error].err{refused(s, got.err)};
+        }
+        out = got.ok;
+    }
+    out[b.len] = 0;
+    b.data     = nil;
+    b.cap      = 0;
+    ret res[*u8, Error].ok{out};
+}
+
+fun token_at(kind: TokenKind, mark: Mark) Token {
+    var t: Token;
+    t.kind = kind;
+    t.mark = mark;
+    ret t;
+}
+
+fun emit(s: *Scanner, t: Token) err[Error] {
+    val pushed: res[usize, allocator.Error] = vec.push[Token](?s.queue, t);
+    if (sel pushed.err) { ret fail(refused(s, pushed.err)); }
+    ret pass();
+}
+
+# put a token at a queue index, shifting the tokens from there on
+fun emit_at(s: *Scanner, at: usize, t: Token) err[Error] {
+    val pushed: err[Error] = emit(s, t);
+    if (sel pushed.err) { ret pushed; }
+    var i: usize = s.queue.len - 1;
+    for (i > at) {
+        s.queue.data[i] = s.queue.data[i - 1];
+        i               = i - 1;
+    }
+    s.queue.data[at] = t;
+    ret pass();
+}
+
+# the queue index of the token with this number
+fun queue_index(s: *Scanner, number: usize) usize {
+    ret number - s.parsed + s.head;
+}
+
+fun check_depth(s: *Scanner, extra: usize) err[Error] {
+    if (s.indents.len + s.flow + extra > s.limits.max_depth) { ret fail(Error.depth{here(s)}); }
+    ret pass();
+}
+
+fun remove_simple_key(s: *Scanner) err[Error] {
+    val key: *SimpleKey = ?s.keys.data[s.keys.len - 1];
+    if (key.possible && key.required) { ret fail(Error.key{key.mark}); }
+    key.possible = false;
+    ret pass();
+}
+
+fun save_simple_key(s: *Scanner) err[Error] {
+    if (!s.allowed) { ret pass(); }
+    var key: SimpleKey;
+    key.possible = true;
+    key.required = s.flow == 0 && s.indent == s.col::i64;
+    key.number   = s.parsed + s.queue.len - s.head;
+    key.col      = s.col;
+    key.mark     = here(s);
+
+    val removed: err[Error] = remove_simple_key(s);
+    if (sel removed.err) { ret removed; }
+    s.keys.data[s.keys.len - 1] = key;
+    ret pass();
+}
+
+fun stale_simple_keys(s: *Scanner) err[Error] {
+    var i: usize = 0;
+    for (i < s.keys.len) {
+        val key: *SimpleKey = ?s.keys.data[i];
+        if (key.possible && (key.mark.line < s.line || key.mark.offset + 1024 < s.pos)) {
+            if (key.required) { ret fail(Error.key{key.mark}); }
+            key.possible = false;
+        }
+        i = i + 1;
+    }
+    ret pass();
+}
+
+fun roll_indent(s: *Scanner, col: usize, at: usize, kind: TokenKind, mark: Mark, append: bool) err[Error] {
+    if (s.flow > 0)           { ret pass(); }
+    if (s.indent >= col::i64) { ret pass(); }
+
+    val deep: err[Error] = check_depth(s, 1);
+    if (sel deep.err) { ret deep; }
+    val pushed: res[usize, allocator.Error] = vec.push[i64](?s.indents, s.indent);
+    if (sel pushed.err) { ret fail(refused(s, pushed.err)); }
+    s.indent = col::i64;
+
+    if (append) { ret emit(s, token_at(kind, mark)); }
+    ret emit_at(s, queue_index(s, at), token_at(kind, mark));
+}
+
+fun unroll_indent(s: *Scanner, col: i64) err[Error] {
+    if (s.flow > 0) { ret pass(); }
+    for (s.indent > col) {
+        val ended: err[Error] = emit(s, token_at(TOK_BLOCK_END, here(s)));
+        if (sel ended.err) { ret ended; }
+        val prev: opt[i64] = vec.pop[i64](?s.indents);
+        s.indent = -1;
+        if (sel prev.some) { s.indent = prev.some; }
+    }
+    ret pass();
+}
+
+fun at_doc_marker(s: *Scanner) bool {
+    if (s.col != 0) { ret false; }
+    val c: u8 = peek_at(s, 0);
+    if (c != '-' && c != '.') { ret false; }
+    ret peek_at(s, 1) == c && peek_at(s, 2) == c && is_blankz_at(s, 3);
+}
+
+fun scan_to_next_token(s: *Scanner) {
+    for {
+        for (is_blank_at(s, 0) && (peek_at(s, 0) == ' ' || s.flow > 0 || !s.allowed)) {
+            skip(s);
+        }
+        if (peek_at(s, 0) == '#' && !at_end(s, 0)) {
+            for (!is_breakz_at(s, 0)) {
+                skip(s);
+            }
+        }
+        if (is_break_at(s, 0)) {
+            skip(s);
+            if (s.flow == 0) { s.allowed = true; }
+        }
+        or {
+            brk;
+        }
+    }
+}
+
+fun emit_text(s: *Scanner, kind: TokenKind, style: Style, mark: Mark, b: *Buf) err[Error] {
+    val len: usize           = b.len;
+    val got: res[*u8, Error] = buf_finish(s, b);
+    if (sel got.err) { ret fail(got.err); }
+    var t: Token = token_at(kind, mark);
+    t.style    = style;
+    t.text     = got.ok;
+    t.text_len = len;
+    val pushed: err[Error] = emit(s, t);
+    if (sel pushed.err) {
+        node.own_free(s.alloc, t.text, len);
+        ret pushed;
+    }
+    ret pass();
+}
+
+fun gap_into(s: *Scanner, b: *Buf, breaks: usize, ws_start: usize, ws_len: usize) err[Error] {
+    if (breaks == 0) { ret buf_put_src(s, b, ws_start, ws_len); }
+    if (breaks == 1) { ret buf_put(s, b, ' '); }
+    ret buf_repeat(s, b, '\n', breaks - 1);
+}
+
+# scan a plain scalar into b, setting crossed when it ended after a line break
+fun plain_into(s: *Scanner, b: *Buf, crossed: *bool) err[Error] {
+    val indent:   i64   = s.indent + 1;
+    var breaks:   usize = 0;
+    var ws_start: usize = 0;
+    var ws_len:   usize = 0;
+    var gap:      bool  = false;
+
+    for {
+        if (at_doc_marker(s) || peek_at(s, 0) == '#') { brk; }
+
+        var progressed: bool = false;
+        for (!is_blankz_at(s, 0)) {
+            val c: u8 = peek_at(s, 0);
+            if (c == ':' && (is_blankz_at(s, 1) || (s.flow > 0 && is_flow_indicator(peek_at(s, 1))))) { brk; }
+            if (s.flow > 0 && is_flow_indicator(c))                                                   { brk; }
+            if (!printable(c))                                                                        { ret fail(Error.character{here(s)}); }
+            if (gap) {
+                val joined: err[Error] = gap_into(s, b, breaks, ws_start, ws_len);
+                if (sel joined.err) { ret joined; }
+                gap = false;
+            }
+            val put: err[Error] = buf_put(s, b, c);
+            if (sel put.err) { ret put; }
+            skip(s);
+            progressed = true;
+            @crossed   = false;
+        }
+        if (!progressed)                              { brk; }
+        if (!is_blank_at(s, 0) && !is_break_at(s, 0)) { brk; }
+
+        breaks   = 0;
+        ws_start = s.pos;
+        ws_len   = 0;
+        for (is_blank_at(s, 0) || is_break_at(s, 0)) {
+            if (is_blank_at(s, 0)) {
+                if (breaks == 0) { ws_len = ws_len + 1; }
+                or (s.flow == 0 && s.col::i64 < indent && peek_at(s, 0) == '\t') {
+                    ret fail(Error.tab{here(s)});
+                }
+            }
+            skip(s);
+            if (is_break_byte(s.src[s.pos - 1])) { breaks = breaks + 1; }
+        }
+        gap      = true;
+        @crossed = breaks > 0;
+        if (breaks > 0 && s.flow == 0 && s.col::i64 < indent) { brk; }
+    }
+    ret pass();
+}
+
+fun fetch_plain(s: *Scanner) err[Error] {
+    val saved: err[Error] = save_simple_key(s);
+    if (sel saved.err) { ret saved; }
+    s.allowed = false;
+
+    val mark:    Mark       = here(s);
+    var b:       Buf;
+    var crossed: bool       = false;
+    val r:       err[Error] = plain_into(s, ?b, ?crossed);
+    if (sel r.err) {
+        buf_free(s, ?b);
+        ret r;
+    }
+    if (crossed) { s.allowed = true; }
+    ret emit_text(s, TOK_SCALAR, node.PLAIN, mark, ?b);
+}
+
+fun escape_into(s: *Scanner, b: *Buf) err[Error] {
+    val mark:   Mark  = here(s);
+    val c:      u8    = peek_at(s, 1);
+    var cp:     u32   = 0;
+    var digits: usize = 0;
+
+    if (c == '0')  { cp = 0; }
+    or (c == 'a')  { cp = 7; }
+    or (c == 'b')  { cp = 8; }
+    or (c == 't')  { cp = 9; }
+    or (c == '\t') { cp = 9; }
+    or (c == 'n')  { cp = 10; }
+    or (c == 'v')  { cp = 11; }
+    or (c == 'f')  { cp = 12; }
+    or (c == 'r')  { cp = 13; }
+    or (c == 'e')  { cp = 27; }
+    or (c == ' ')  { cp = 32; }
+    or (c == '"')  { cp = 34; }
+    or (c == '/')  { cp = 47; }
+    or (c == '\\') { cp = 92; }
+    or (c == 'N')  { cp = 0x85; }
+    or (c == '_')  { cp = 0xA0; }
+    or (c == 'L')  { cp = 0x2028; }
+    or (c == 'P')  { cp = 0x2029; }
+    or (c == 'x')  { digits = 2; }
+    or (c == 'u')  { digits = 4; }
+    or (c == 'U')  { digits = 8; }
+    or             { ret fail(Error.escape{mark}); }
+
+    skip_n(s, 2);
+    var i: usize = 0;
+    for (i < digits) {
+        val h: i64 = hex_value(peek_at(s, 0));
+        if (h < 0 || at_end(s, 0)) { ret fail(Error.escape{mark}); }
+        cp = (cp << 4) | h::u32;
+        skip(s);
+        i = i + 1;
+    }
+    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) { ret fail(Error.escape{mark}); }
+    ret buf_put_cp(s, b, cp);
+}
+
+# scan a quoted scalar into b, stopping after the closing quote
+fun quoted_into(s: *Scanner, b: *Buf, single: bool, start: Mark) err[Error] {
+    var quote: u8 = '"';
+    if (single) { quote = '\''; }
+    skip(s);
+
+    for {
+        if (at_doc_marker(s)) { ret fail(Error.syntax{here(s)}); }
+        if (at_end(s, 0))     { ret fail(Error.unterminated{start}); }
+
+        var escaped: bool = false;
+        for (!is_blankz_at(s, 0)) {
+            val c: u8 = peek_at(s, 0);
+            if (single && c == '\'' && peek_at(s, 1) == '\'') {
+                val put: err[Error] = buf_put(s, b, '\'');
+                if (sel put.err) { ret put; }
+                skip_n(s, 2);
+                cnt;
+            }
+            if (c == quote) { brk; }
+            if (!single && c == '\\') {
+                if (is_break_at(s, 1)) {
+                    skip_n(s, 2);
+                    escaped = true;
+                    brk;
+                }
+                val esc: err[Error] = escape_into(s, b);
+                if (sel esc.err) { ret esc; }
+                cnt;
+            }
+            if (!printable(c)) { ret fail(Error.character{here(s)}); }
+            val put: err[Error] = buf_put(s, b, c);
+            if (sel put.err) { ret put; }
+            skip(s);
+        }
+        if (!escaped && peek_at(s, 0) == quote && !at_end(s, 0)) { brk; }
+
+        var breaks:   usize = 0;
+        val ws_start: usize = s.pos;
+        var ws_len:   usize = 0;
+        for (is_blank_at(s, 0) || is_break_at(s, 0)) {
+            if (is_blank_at(s, 0)) {
+                if (breaks == 0 && !escaped) { ws_len = ws_len + 1; }
+                skip(s);
+            }
+            or {
+                breaks = breaks + 1;
+                skip(s);
+            }
+        }
+        if (escaped) {
+            val joined: err[Error] = buf_repeat(s, b, '\n', breaks);
+            if (sel joined.err) { ret joined; }
+        }
+        or {
+            val joined: err[Error] = gap_into(s, b, breaks, ws_start, ws_len);
+            if (sel joined.err) { ret joined; }
+        }
+    }
+    skip(s);
+    ret pass();
+}
+
+fun fetch_quoted(s: *Scanner, single: bool) err[Error] {
+    val saved: err[Error] = save_simple_key(s);
+    if (sel saved.err) { ret saved; }
+    s.allowed = false;
+
+    val mark: Mark       = here(s);
+    var b:    Buf;
+    val r:    err[Error] = quoted_into(s, ?b, single, mark);
+    if (sel r.err) {
+        buf_free(s, ?b);
+        ret r;
+    }
+    var style: Style = node.DOUBLE;
+    if (single) { style = node.SINGLE; }
+    ret emit_text(s, TOK_SCALAR, style, mark, ?b);
+}
+
+# consume the indentation of the lines at the top of a block scalar and count its empty lines
+fun block_breaks(s: *Scanner, indent: *i64, detected: *bool, trailing: *usize) err[Error] {
+    var max_indent: usize = 0;
+    for {
+        for ((!@detected || s.col::i64 < @indent) && peek_at(s, 0) == ' ' && !at_end(s, 0)) {
+            skip(s);
+        }
+        if (s.col > max_indent) { max_indent = s.col; }
+        if ((!@detected || s.col::i64 < @indent) && peek_at(s, 0) == '\t' && !at_end(s, 0)) {
+            ret fail(Error.tab{here(s)});
+        }
+        if (!is_break_at(s, 0)) { brk; }
+        skip(s);
+        @trailing = @trailing + 1;
+    }
+    if (!@detected) {
+        @indent = max_indent::i64;
+        if (@indent < s.indent + 1) { @indent = s.indent + 1; }
+        @detected = true;
+    }
+    ret pass();
+}
+
+fun block_into(s: *Scanner, b: *Buf, literal: bool) err[Error] {
+    skip(s);
+    var chomp: i64 = 0;
+    var inc:   i64 = 0;
+    val c:     u8  = peek_at(s, 0);
+    if (c == '+' || c == '-') {
+        chomp = 1;
+        if (c == '-') { chomp = -1; }
+        skip(s);
+        val d: u8 = peek_at(s, 0);
+        if (d >= '0' && d <= '9') {
+            if (d == '0') { ret fail(Error.header{here(s)}); }
+            inc = (d - '0')::i64;
+            skip(s);
+        }
+    }
+    or (c >= '0' && c <= '9') {
+        if (c == '0') { ret fail(Error.header{here(s)}); }
+        inc = (c - '0')::i64;
+        skip(s);
+        val d: u8 = peek_at(s, 0);
+        if (d == '+' || d == '-') {
+            chomp = 1;
+            if (d == '-') { chomp = -1; }
+            skip(s);
+        }
+    }
+
+    for (is_blank_at(s, 0)) {
+        skip(s);
+    }
+    if (peek_at(s, 0) == '#') {
+        for (!is_breakz_at(s, 0)) {
+            skip(s);
+        }
+    }
+    if (!is_breakz_at(s, 0)) { ret fail(Error.header{here(s)}); }
+    if (is_break_at(s, 0))   { skip(s); }
+
+    var indent:   i64   = 0;
+    var detected: bool  = false;
+    var trailing: usize = 0;
+    if (inc > 0) {
+        detected = true;
+        indent   = inc;
+        if (s.indent >= 0) { indent = s.indent + inc; }
+    }
+    val first: err[Error] = block_breaks(s, ?indent, ?detected, ?trailing);
+    if (sel first.err) { ret first; }
+
+    var leading:       bool = false;
+    var leading_blank: bool = false;
+    for (s.col::i64 == indent && !at_end(s, 0) && !at_doc_marker(s)) {
+        val trailing_blank: bool = is_blank_at(s, 0);
+        if (!literal && leading && !leading_blank && !trailing_blank) {
+            if (trailing == 0) {
+                val put: err[Error] = buf_put(s, b, ' ');
+                if (sel put.err) { ret put; }
+            }
+        }
+        or (leading) {
+            val put: err[Error] = buf_put(s, b, '\n');
+            if (sel put.err) { ret put; }
+        }
+        leading = false;
+        val lines: err[Error] = buf_repeat(s, b, '\n', trailing);
+        if (sel lines.err) { ret lines; }
+        trailing      = 0;
+        leading_blank = trailing_blank;
+
+        for (!is_breakz_at(s, 0)) {
+            val ch: u8 = peek_at(s, 0);
+            if (!printable(ch)) { ret fail(Error.character{here(s)}); }
+            val put: err[Error] = buf_put(s, b, ch);
+            if (sel put.err) { ret put; }
+            skip(s);
+        }
+        if (is_break_at(s, 0)) {
+            skip(s);
+            leading = true;
+        }
+        val more: err[Error] = block_breaks(s, ?indent, ?detected, ?trailing);
+        if (sel more.err) { ret more; }
+    }
+
+    if (chomp != -1 && leading) {
+        val put: err[Error] = buf_put(s, b, '\n');
+        if (sel put.err) { ret put; }
+    }
+    if (chomp == 1) { ret buf_repeat(s, b, '\n', trailing); }
+    ret pass();
+}
+
+fun fetch_block_scalar(s: *Scanner, literal: bool) err[Error] {
+    val removed: err[Error] = remove_simple_key(s);
+    if (sel removed.err) { ret removed; }
+    s.allowed = true;
+
+    val mark: Mark       = here(s);
+    var b:    Buf;
+    val r:    err[Error] = block_into(s, ?b, literal);
+    if (sel r.err) {
+        buf_free(s, ?b);
+        ret r;
+    }
+    var style: Style = node.FOLDED;
+    if (literal) { style = node.LITERAL; }
+    ret emit_text(s, TOK_SCALAR, style, mark, ?b);
+}
+
+fun is_name_stop(s: *Scanner) bool {
+    val c: u8 = peek_at(s, 0);
+    ret is_blankz_at(s, 0) || is_flow_indicator(c) || (c == ':' && is_blankz_at(s, 1));
+}
+
+fun fetch_anchor(s: *Scanner, kind: TokenKind) err[Error] {
+    val saved: err[Error] = save_simple_key(s);
+    if (sel saved.err) { ret saved; }
+    s.allowed = false;
+
+    val mark: Mark = here(s);
+    skip(s);
+    var b: Buf;
+    for (!is_name_stop(s)) {
+        val c: u8 = peek_at(s, 0);
+        if (!printable(c)) {
+            buf_free(s, ?b);
+            ret fail(Error.character{here(s)});
+        }
+        val put: err[Error] = buf_put(s, ?b, c);
+        if (sel put.err) {
+            buf_free(s, ?b);
+            ret put;
+        }
+        skip(s);
+    }
+    if (b.len == 0) { ret fail(Error.anchor{mark}); }
+    ret emit_text(s, kind, node.PLAIN, mark, ?b);
+}
+
+fun is_uri_byte(c: u8, verbatim: bool) bool {
+    if (is_alnum(c))                                                                                                           { ret true; }
+    if (c == '-' || c == '#' || c == ';' || c == '/' || c == '?' || c == ':' || c == '@' || c == '&')                          { ret true; }
+    if (c == '=' || c == '+' || c == '$' || c == '_' || c == '.' || c == '~' || c == '*' || c == '\'' || c == '(' || c == ')') { ret true; }
+    ret verbatim && (c == '!' || is_flow_indicator(c));
+}
+
+# scan uri characters into b, decoding %XX escapes
+fun uri_into(s: *Scanner, b: *Buf, verbatim: bool, mark: Mark) err[Error] {
+    for {
+        val c: u8 = peek_at(s, 0);
+        if (at_end(s, 0)) { brk; }
+        if (c == '%') {
+            val hi: i64 = hex_value(peek_at(s, 1));
+            val lo: i64 = hex_value(peek_at(s, 2));
+            if (hi < 0 || lo < 0 || at_end(s, 2)) { ret fail(Error.bad_tag{mark}); }
+            val put: err[Error] = buf_put(s, b, ((hi << 4) | lo)::u8);
+            if (sel put.err) { ret put; }
+            skip_n(s, 3);
+            cnt;
+        }
+        if (!is_uri_byte(c, verbatim)) { brk; }
+        val put: err[Error] = buf_put(s, b, c);
+        if (sel put.err) { ret put; }
+        skip(s);
+    }
+    ret pass();
+}
+
+fun tag_into(s: *Scanner, handle: *Buf, suffix: *Buf, mark: Mark) err[Error] {
+    skip(s);
+    if (peek_at(s, 0) == '<') {
+        skip(s);
+        val body: err[Error] = uri_into(s, suffix, true, mark);
+        if (sel body.err)                                            { ret body; }
+        if (peek_at(s, 0) != '>' || at_end(s, 0) || suffix.len == 0) { ret fail(Error.bad_tag{mark}); }
+        skip(s);
+        ret pass();
+    }
+
+    var n: usize = 0;
+    for (is_alnum(peek_at(s, n)) || peek_at(s, n) == '-') {
+        n = n + 1;
+    }
+    val put: err[Error] = buf_put(s, handle, '!');
+    if (sel put.err) { ret put; }
+    if (peek_at(s, n) == '!' && !at_end(s, n)) {
+        var i: usize = 0;
+        for (i < n) {
+            val w: err[Error] = buf_put(s, handle, peek_at(s, i));
+            if (sel w.err) { ret w; }
+            i = i + 1;
+        }
+        val close: err[Error] = buf_put(s, handle, '!');
+        if (sel close.err) { ret close; }
+        skip_n(s, n + 1);
+    }
+    val body: err[Error] = uri_into(s, suffix, false, mark);
+    if (sel body.err)                      { ret body; }
+    if (handle.len > 1 && suffix.len == 0) { ret fail(Error.bad_tag{mark}); }
+    ret pass();
+}
+
+fun fetch_tag(s: *Scanner) err[Error] {
+    val saved: err[Error] = save_simple_key(s);
+    if (sel saved.err) { ret saved; }
+    s.allowed = false;
+
+    val mark:   Mark       = here(s);
+    var handle: Buf;
+    var suffix: Buf;
+    val r:      err[Error] = tag_into(s, ?handle, ?suffix, mark);
+    if (sel r.err) {
+        buf_free(s, ?handle);
+        buf_free(s, ?suffix);
+        ret r;
+    }
+    if (!is_blankz_at(s, 0) && !(s.flow > 0 && is_flow_indicator(peek_at(s, 0)))) {
+        buf_free(s, ?handle);
+        buf_free(s, ?suffix);
+        ret fail(Error.bad_tag{mark});
+    }
+
+    var t: Token = token_at(TOK_TAG, mark);
+    if (handle.len > 0) {
+        t.text_len = handle.len;
+        val h: res[*u8, Error] = buf_finish(s, ?handle);
+        if (sel h.err) {
+            buf_free(s, ?suffix);
+            ret fail(h.err);
+        }
+        t.text = h.ok;
+    }
+    t.text2_len = suffix.len;
+    val x: res[*u8, Error] = buf_finish(s, ?suffix);
+    if (sel x.err) {
+        token_free(s.alloc, ?t);
+        ret fail(x.err);
+    }
+    t.text2 = x.ok;
+
+    val pushed: err[Error] = emit(s, t);
+    if (sel pushed.err) {
+        token_free(s.alloc, ?t);
+        ret pushed;
+    }
+    ret pass();
+}
+
+fun skip_blanks(s: *Scanner) {
+    for (is_blank_at(s, 0)) {
+        skip(s);
+    }
+}
+
+fun end_of_line(s: *Scanner) bool {
+    skip_blanks(s);
+    if (peek_at(s, 0) == '#') {
+        for (!is_breakz_at(s, 0)) {
+            skip(s);
+        }
+    }
+    if (!is_breakz_at(s, 0)) { ret false; }
+    if (is_break_at(s, 0))   { skip(s); }
+    ret true;
+}
+
+fun directive_into(s: *Scanner, mark: Mark, name: *Buf, a: *Buf, b: *Buf) err[Error] {
+    skip(s);
+    for (is_alnum(peek_at(s, 0)) || peek_at(s, 0) == '-' || peek_at(s, 0) == '_') {
+        val put: err[Error] = buf_put(s, name, peek_at(s, 0));
+        if (sel put.err) { ret put; }
+        skip(s);
+    }
+    if (name.len == 0) { ret fail(Error.directive{mark}); }
+
+    if (node.bytes_equal(name.data, name.len, "YAML")) {
+        skip_blanks(s);
+        if (peek_at(s, 0) != '1') { ret fail(Error.directive{mark}); }
+        var dots: usize = 0;
+        for (!is_blankz_at(s, 0)) {
+            val c: u8 = peek_at(s, 0);
+            if (c == '.')           { dots = dots + 1; }
+            or (c < '0' || c > '9') { ret fail(Error.directive{mark}); }
+            val put: err[Error] = buf_put(s, a, c);
+            if (sel put.err) { ret put; }
+            skip(s);
+        }
+        if (dots != 1 || a.data[a.len - 1] == '.' || a.data[1] != '.') { ret fail(Error.directive{mark}); }
+    }
+    or (node.bytes_equal(name.data, name.len, "TAG")) {
+        skip_blanks(s);
+        if (peek_at(s, 0) != '!') { ret fail(Error.directive{mark}); }
+        val bang: err[Error] = buf_put(s, a, '!');
+        if (sel bang.err) { ret bang; }
+        skip(s);
+        for (is_alnum(peek_at(s, 0)) || peek_at(s, 0) == '-') {
+            val put: err[Error] = buf_put(s, a, peek_at(s, 0));
+            if (sel put.err) { ret put; }
+            skip(s);
+        }
+        if (peek_at(s, 0) == '!') {
+            val close: err[Error] = buf_put(s, a, '!');
+            if (sel close.err) { ret close; }
+            skip(s);
+        }
+        or (a.len > 1) {
+            ret fail(Error.directive{mark});
+        }
+        if (!is_blank_at(s, 0)) { ret fail(Error.directive{mark}); }
+        skip_blanks(s);
+        val prefix: err[Error] = uri_into(s, b, true, mark);
+        if (sel prefix.err)                    { ret prefix; }
+        if (b.len == 0 || !is_blankz_at(s, 0)) { ret fail(Error.directive{mark}); }
+    }
+    or {
+        for (!is_breakz_at(s, 0) && peek_at(s, 0) != '#') {
+            skip(s);
+        }
+    }
+    if (!end_of_line(s)) { ret fail(Error.directive{mark}); }
+    ret pass();
+}
+
+fun fetch_directive(s: *Scanner) err[Error] {
+    val rolled: err[Error] = unroll_indent(s, -1);
+    if (sel rolled.err) { ret rolled; }
+    val removed: err[Error] = remove_simple_key(s);
+    if (sel removed.err) { ret removed; }
+    s.allowed = false;
+
+    val mark: Mark       = here(s);
+    var name: Buf;
+    var a:    Buf;
+    var b:    Buf;
+    val r:    err[Error] = directive_into(s, mark, ?name, ?a, ?b);
+    var kind: TokenKind  = TOK_STREAM_END;
+    if (!(sel r.err)) {
+        if (node.bytes_equal(name.data, name.len, "YAML")) { kind = TOK_VERSION; }
+        or (node.bytes_equal(name.data, name.len, "TAG"))  { kind = TOK_TAG_DIRECTIVE; }
+    }
+    buf_free(s, ?name);
+    if (sel r.err || kind == TOK_STREAM_END) {
+        buf_free(s, ?a);
+        buf_free(s, ?b);
+        ret r;
+    }
+
+    var t: Token = token_at(kind, mark);
+    t.text_len = a.len;
+    val first: res[*u8, Error] = buf_finish(s, ?a);
+    if (sel first.err) {
+        buf_free(s, ?b);
+        ret fail(first.err);
+    }
+    t.text = first.ok;
+    if (kind == TOK_TAG_DIRECTIVE) {
+        t.text2_len = b.len;
+        val second: res[*u8, Error] = buf_finish(s, ?b);
+        if (sel second.err) {
+            token_free(s.alloc, ?t);
+            ret fail(second.err);
+        }
+        t.text2 = second.ok;
+    }
+    or {
+        buf_free(s, ?b);
+    }
+    val pushed: err[Error] = emit(s, t);
+    if (sel pushed.err) {
+        token_free(s.alloc, ?t);
+        ret pushed;
+    }
+    ret pass();
+}
+
+fun fetch_doc_indicator(s: *Scanner, kind: TokenKind) err[Error] {
+    val rolled: err[Error] = unroll_indent(s, -1);
+    if (sel rolled.err) { ret rolled; }
+    val removed: err[Error] = remove_simple_key(s);
+    if (sel removed.err) { ret removed; }
+    s.allowed = false;
+    val mark: Mark = here(s);
+    skip_n(s, 3);
+    ret emit(s, token_at(kind, mark));
+}
+
+fun fetch_flow_start(s: *Scanner, kind: TokenKind) err[Error] {
+    val saved: err[Error] = save_simple_key(s);
+    if (sel saved.err) { ret saved; }
+    val deep: err[Error] = check_depth(s, 1);
+    if (sel deep.err) { ret deep; }
+    var blank:  SimpleKey;
+    val pushed: res[usize, allocator.Error] = vec.push[SimpleKey](?s.keys, blank);
+    if (sel pushed.err) { ret fail(refused(s, pushed.err)); }
+    s.flow    = s.flow + 1;
+    s.allowed = true;
+    val mark: Mark = here(s);
+    skip(s);
+    ret emit(s, token_at(kind, mark));
+}
+
+fun fetch_flow_end(s: *Scanner, kind: TokenKind) err[Error] {
+    val removed: err[Error] = remove_simple_key(s);
+    if (sel removed.err) { ret removed; }
+    if (s.flow > 0) {
+        s.flow = s.flow - 1;
+        vec.pop[SimpleKey](?s.keys);
+    }
+    s.allowed = false;
+    val mark: Mark = here(s);
+    skip(s);
+    ret emit(s, token_at(kind, mark));
+}
+
+fun fetch_flow_entry(s: *Scanner) err[Error] {
+    val removed: err[Error] = remove_simple_key(s);
+    if (sel removed.err) { ret removed; }
+    s.allowed = true;
+    val mark: Mark = here(s);
+    skip(s);
+    ret emit(s, token_at(TOK_FLOW_ENTRY, mark));
+}
+
+fun fetch_block_entry(s: *Scanner) err[Error] {
+    val mark: Mark = here(s);
+    if (s.flow == 0) {
+        if (!s.allowed) { ret fail(Error.syntax{mark}); }
+        val rolled: err[Error] = roll_indent(s, s.col, 0, TOK_BLOCK_SEQ, mark, true);
+        if (sel rolled.err) { ret rolled; }
+    }
+    val removed: err[Error] = remove_simple_key(s);
+    if (sel removed.err) { ret removed; }
+    s.allowed = true;
+    skip(s);
+    ret emit(s, token_at(TOK_BLOCK_ENTRY, mark));
+}
+
+fun fetch_key(s: *Scanner) err[Error] {
+    val mark: Mark = here(s);
+    if (s.flow == 0) {
+        if (!s.allowed) { ret fail(Error.key{mark}); }
+        val rolled: err[Error] = roll_indent(s, s.col, 0, TOK_BLOCK_MAP, mark, true);
+        if (sel rolled.err) { ret rolled; }
+    }
+    val removed: err[Error] = remove_simple_key(s);
+    if (sel removed.err) { ret removed; }
+    s.allowed = s.flow == 0;
+    skip(s);
+    ret emit(s, token_at(TOK_KEY, mark));
+}
+
+fun fetch_value(s: *Scanner) err[Error] {
+    val mark: Mark       = here(s);
+    val key:  *SimpleKey = ?s.keys.data[s.keys.len - 1];
+    if (key.possible) {
+        val at: usize      = queue_index(s, key.number);
+        val k:  err[Error] = emit_at(s, at, token_at(TOK_KEY, key.mark));
+        if (sel k.err) { ret k; }
+        val rolled: err[Error] = roll_indent(s, key.col, key.number, TOK_BLOCK_MAP, key.mark, false);
+        if (sel rolled.err) { ret rolled; }
+        key.possible = false;
+        s.allowed    = false;
+    }
+    or {
+        if (s.flow == 0) {
+            if (!s.allowed) { ret fail(Error.key{mark}); }
+            val rolled: err[Error] = roll_indent(s, s.col, 0, TOK_BLOCK_MAP, mark, true);
+            if (sel rolled.err) { ret rolled; }
+        }
+        s.allowed = s.flow == 0;
+    }
+    skip(s);
+    ret emit(s, token_at(TOK_VALUE, mark));
+}
+
+fun fetch_stream_end(s: *Scanner) err[Error] {
+    if (s.col != 0) {
+        s.col  = 0;
+        s.line = s.line + 1;
+    }
+    val rolled: err[Error] = unroll_indent(s, -1);
+    if (sel rolled.err) { ret rolled; }
+    val removed: err[Error] = remove_simple_key(s);
+    if (sel removed.err) { ret removed; }
+    s.allowed = false;
+    s.done    = true;
+    ret emit(s, token_at(TOK_STREAM_END, here(s)));
+}
+
+fun plain_start(s: *Scanner) bool {
+    val c: u8 = peek_at(s, 0);
+    if (!(is_blankz_at(s, 0) || c == '-' || c == '?' || c == ':' || is_flow_indicator(c) || c == '#' || c == '&' || c == '*' || c == '!')) {
+        if (!(c == '|' || c == '>' || c == '\'' || c == '"' || c == '%' || c == '@' || c == '`')) { ret true; }
+    }
+    if (c == '-' && !is_blank_at(s, 1)) { ret true; }
+    ret s.flow == 0 && (c == '?' || c == ':') && !is_blankz_at(s, 1);
+}
+
+fun start_stream(s: *Scanner) err[Error] {
+    s.started = true;
+    if (s.len >= 3 && s.src[0] == 0xEF && s.src[1] == 0xBB && s.src[2] == 0xBF) {
+        s.pos = 3;
+    }
+    or (s.len >= 2 && ((s.src[0] == 0xFE && s.src[1] == 0xFF) || (s.src[0] == 0xFF && s.src[1] == 0xFE))) {
+        ret fail(Error.character{here(s)});
+    }
+    ret pass();
+}
+
+fun fetch_next(s: *Scanner) err[Error] {
+    if (!s.started) {
+        val begun: err[Error] = start_stream(s);
+        if (sel begun.err) { ret begun; }
+    }
+    scan_to_next_token(s);
+    val stale: err[Error] = stale_simple_keys(s);
+    if (sel stale.err) { ret stale; }
+    val rolled: err[Error] = unroll_indent(s, s.col::i64);
+    if (sel rolled.err) { ret rolled; }
+
+    if (at_end(s, 0)) { ret fetch_stream_end(s); }
+    val c: u8 = peek_at(s, 0);
+
+    if (s.col == 0 && c == '%') { ret fetch_directive(s); }
+    if (at_doc_marker(s)) {
+        if (c == '-') { ret fetch_doc_indicator(s, TOK_DOC_START); }
+        ret fetch_doc_indicator(s, TOK_DOC_END);
+    }
+    if (c == '[')                                       { ret fetch_flow_start(s, TOK_FLOW_SEQ); }
+    if (c == '{')                                       { ret fetch_flow_start(s, TOK_FLOW_MAP); }
+    if (c == ']')                                       { ret fetch_flow_end(s, TOK_FLOW_SEQ_END); }
+    if (c == '}')                                       { ret fetch_flow_end(s, TOK_FLOW_MAP_END); }
+    if (c == ',')                                       { ret fetch_flow_entry(s); }
+    if (c == '-' && is_blankz_at(s, 1))                 { ret fetch_block_entry(s); }
+    if (c == '?' && (s.flow > 0 || is_blankz_at(s, 1))) { ret fetch_key(s); }
+    if (c == ':' && (s.flow > 0 || is_blankz_at(s, 1))) { ret fetch_value(s); }
+    if (c == '*')                                       { ret fetch_anchor(s, TOK_ALIAS); }
+    if (c == '&')                                       { ret fetch_anchor(s, TOK_ANCHOR); }
+    if (c == '!')                                       { ret fetch_tag(s); }
+    if (c == '|' && s.flow == 0)                        { ret fetch_block_scalar(s, true); }
+    if (c == '>' && s.flow == 0)                        { ret fetch_block_scalar(s, false); }
+    if (c == '\'')                                      { ret fetch_quoted(s, true); }
+    if (c == '"')                                       { ret fetch_quoted(s, false); }
+    if (plain_start(s))                                 { ret fetch_plain(s); }
+    if (c == '\t')                                      { ret fail(Error.tab{here(s)}); }
+    if (!printable(c))                                  { ret fail(Error.character{here(s)}); }
+    ret fail(Error.syntax{here(s)});
+}
+
+fun need_more(s: *Scanner) bool {
+    if (s.head == s.queue.len) { ret true; }
+    var i: usize = 0;
+    for (i < s.keys.len) {
+        val key: *SimpleKey = ?s.keys.data[i];
+        if (key.possible && key.number == s.parsed) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+# the next token, scanning as far ahead as it needs
+pub fun peek(s: *Scanner) res[*Token, Error] {
+    for {
+        if (!s.done && s.head < s.queue.len) {
+            val stale: err[Error] = stale_simple_keys(s);
+            if (sel stale.err) { ret res[*Token, Error].err{stale.err}; }
+        }
+        if (s.done || !need_more(s)) { brk; }
+        val fetched: err[Error] = fetch_next(s);
+        if (s.bad)           { ret res[*Token, Error].err{Error.character{s.bad_at}}; }
+        if (sel fetched.err) { ret res[*Token, Error].err{fetched.err}; }
+    }
+    ret res[*Token, Error].ok{?s.queue.data[s.head]};
+}
+
+# take the token peek returned, whose strings pass to the caller
+pub fun take(s: *Scanner) Token {
+    val t: Token = s.queue.data[s.head];
+    s.queue.data[s.head].text      = nil;
+    s.queue.data[s.head].text_len  = 0;
+    s.queue.data[s.head].text2     = nil;
+    s.queue.data[s.head].text2_len = 0;
+    if (t.kind != TOK_STREAM_END) {
+        s.head   = s.head + 1;
+        s.parsed = s.parsed + 1;
+        if (s.head == s.queue.len) {
+            s.head      = 0;
+            s.queue.len = 0;
+        }
+    }
+    ret t;
+}
+
+$if (capability.HOSTED) {
+    use std.allocator.page;
+    use std.types.string.str_len;
+
+    rec Case {
+        src:  str;
+        want: str;
+    }
+
+    # the text of the first scalar the scanner finds, in a buffer the caller frees
+    #[testing]
+    fun first_scalar(src: str, a: *allocator.Allocator, text: **u8, len: *usize) bool {
+        var s: Scanner;
+        init(?s, src, str_len(src), a, error.limits_default());
+        fin {
+            dnit(?s);
+        }
+        for {
+            val got: res[*Token, Error] = peek(?s);
+            if (sel got.err) { ret false; }
+            var t: Token = take(?s);
+            if (t.kind == TOK_SCALAR) {
+                @text = t.text;
+                @len  = t.text_len;
+                ret true;
+            }
+            token_free(a, ?t);
+            if (t.kind == TOK_STREAM_END) { ret false; }
+        }
+        ret false;
+    }
+
+    # plain, quoted with escapes, literal and folded scalars with every chomping mode
+    test scan__scalars {
+        var a: allocator.Allocator;
+        page.make(?a);
+        val cases: [20]Case = [20]Case{
+            Case{src: "plain", want: "plain"},
+            Case{src: "a  b\n  c\n\n  d\n", want: "a  b c\nd"},
+            Case{src: "'it''s'", want: "it's"},
+            Case{src: "'a\n  b\n\n  c'", want: "a b\nc"},
+            Case{src: "\"tab\\t nl\\n q\\\" \\x41 \\u00e9 \\U0001F600 \\/ \\N\"", want: "tab\t nl\n q\" A \xc3\xa9 \xf0\x9f\x98\x80 / \xc2\x85"},
+            Case{src: "\"a\n  b\n\n  c\"", want: "a b\nc"},
+            Case{src: "\"a \\\n   b\"", want: "a b"},
+            Case{src: "|\n  a\n   b\n\n  c\n", want: "a\n b\n\nc\n"},
+            Case{src: "|-\n  a\n   b\n\n  c\n", want: "a\n b\n\nc"},
+            Case{src: "|+\n  a\n\n\n", want: "a\n\n\n"},
+            Case{src: "|\n  a\n\n\n", want: "a\n"},
+            Case{src: "|2\n   a\n  b\n", want: " a\nb\n"},
+            Case{src: ">\n a\n b\n\n c\n  d\n e\n", want: "a b\nc\n d\ne\n"},
+            Case{src: ">-\n a\n b\n", want: "a b"},
+            Case{src: ">+\n a\n b\n\n\n", want: "a b\n\n\n"},
+            Case{src: ">\n a\n b\n\n\n", want: "a b\n"},
+            Case{src: "|\n  x\n  y\nnext: 1\n", want: "x\ny\n"},
+            Case{src: "# lead\n'a#b' # trail\n", want: "a#b"},
+            Case{src: "a:b c", want: "a:b c"},
+            Case{src: "--- |\nraw\n...\n", want: "raw\n"}
+        };
+
+        var i: usize = 0;
+        for (i < 20) {
+            var text: *u8;
+            var len:  usize = 0;
+            if (!first_scalar(cases[i].src, ?a, ?text, ?len)) { ret (100 + i)::i32; }
+            val same: bool = node.bytes_equal(text, len, cases[i].want);
+            node.own_free(?a, text, len);
+            if (!same) { ret (200 + i)::i32; }
+            i = i + 1;
+        }
+        ret 0;
+    }
+}

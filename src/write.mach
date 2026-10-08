@@ -1,0 +1,556 @@
+# the writer: a tree to block style text through a writer
+
+use std.io.writer;
+use std.io.writer.WriteError;
+use std.system.capability;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_len;
+
+use yaml.error;
+use yaml.error.Limits;
+use yaml.error.Mark;
+use yaml.node;
+use yaml.node.Node;
+use yaml.parse.Stream;
+
+# every way a write can fail
+pub tag EmitError: u8 {
+    sink: WriteError;
+    # an alias whose target has no anchor name to write
+    unanchored: Mark;
+    # collections nested deeper than the limit
+    depth: Mark;
+}
+
+def Mode: u8;
+val ROOT:      Mode = 0;
+val MARKER:    Mode = 1;
+val AFTER_KEY: Mode = 2;
+val INDICATOR: Mode = 3;
+
+def Form: u8;
+val EMPTY:   Form = 0;
+val PLAIN:   Form = 1;
+val SINGLE:  Form = 2;
+val DOUBLE:  Form = 3;
+val LITERAL: Form = 4;
+
+# where the cursor stands when a node is written
+rec Place {
+    mode:  Mode;
+    child: usize;
+    body:  usize;
+}
+
+rec Emit {
+    w:      *writer.Writer;
+    limits: Limits;
+    failed: bool;
+    error:  EmitError;
+}
+
+fun place_root() Place {
+    ret Place{mode: ROOT, child: 0, body: 2};
+}
+
+fun place_marker() Place {
+    ret Place{mode: MARKER, child: 0, body: 2};
+}
+
+fun place_key(indent: usize) Place {
+    ret Place{mode: AFTER_KEY, child: indent + 2, body: indent + 2};
+}
+
+fun place_indicator(indent: usize) Place {
+    ret Place{mode: INDICATOR, child: indent + 2, body: indent + 2};
+}
+
+fun fault(e: *Emit, cause: EmitError) {
+    if (e.failed) { ret; }
+    e.failed = true;
+    e.error  = cause;
+}
+
+fun put_bytes(e: *Emit, p: *u8, n: usize) {
+    if (e.failed || n == 0) { ret; }
+    val r: err[WriteError] = writer.write_all(e.w, p, n);
+    if (sel r.err) { fault(e, EmitError.sink{r.err}); }
+}
+
+fun put(e: *Emit, s: str) {
+    put_bytes(e, s, str_len(s));
+}
+
+fun put_byte(e: *Emit, c: u8) {
+    var b: u8 = c;
+    put_bytes(e, ?b, 1);
+}
+
+fun put_spaces(e: *Emit, n: usize) {
+    var i: usize = 0;
+    for (i < n) {
+        put_byte(e, ' ');
+        i = i + 1;
+    }
+}
+
+fun put_hex(e: *Emit, c: u8) {
+    val digits: str = "0123456789ABCDEF";
+    put_byte(e, digits[(c >> 4) & 0x0f]);
+    put_byte(e, digits[c & 0x0f]);
+}
+
+fun mark_of(n: *Node) Mark {
+    ret Mark{offset: n.offset, line: n.line, column: n.column};
+}
+
+fun is_alnum(c: u8) bool {
+    ret (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+fun is_flow_indicator(c: u8) bool {
+    ret c == ',' || c == '[' || c == ']' || c == '{' || c == '}';
+}
+
+# a byte a tag may spell as itself
+fun uri_byte(c: u8, verbatim: bool) bool {
+    if (is_alnum(c))                                                                                                           { ret true; }
+    if (c == '-' || c == '#' || c == ';' || c == '/' || c == '?' || c == ':' || c == '@' || c == '&')                          { ret true; }
+    if (c == '=' || c == '+' || c == '$' || c == '_' || c == '.' || c == '~' || c == '*' || c == '\'' || c == '(' || c == ')') { ret true; }
+    ret verbatim && (c == '!' || is_flow_indicator(c));
+}
+
+fun shorthand_ok(p: *u8, from: usize, len: usize) bool {
+    var i: usize = from;
+    for (i < len) {
+        if (!uri_byte(p[i], false)) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun has_prefix(p: *u8, len: usize, prefix: str) bool {
+    val n: usize = str_len(prefix);
+    if (len < n) { ret false; }
+    var i: usize = 0;
+    for (i < n) {
+        if (p[i] != prefix[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun put_tag(e: *Emit, tag: *u8, len: usize) {
+    if (has_prefix(tag, len, "tag:yaml.org,2002:") && len > 18 && shorthand_ok(tag, 18, len)) {
+        put(e, "!!");
+        put_bytes(e, (tag::usize + 18)::*u8, len - 18);
+        ret;
+    }
+    if (len > 0 && tag[0] == '!' && shorthand_ok(tag, 1, len)) {
+        put_bytes(e, tag, len);
+        ret;
+    }
+    put(e, "!<");
+    var i: usize = 0;
+    for (i < len) {
+        if (uri_byte(tag[i], true)) { put_byte(e, tag[i]); }
+        or {
+            put_byte(e, '%');
+            put_hex(e, tag[i]);
+        }
+        i = i + 1;
+    }
+    put(e, ">");
+}
+
+# the tag and anchor of a node on one line, reporting whether any was written
+fun put_props(e: *Emit, n: *Node) bool {
+    var wrote: bool = false;
+    if (n.tag_text != nil) {
+        put_tag(e, n.tag_text, n.tag_len);
+        wrote = true;
+    }
+    if (n.anchor != nil) {
+        if (wrote) { put_byte(e, ' '); }
+        put_byte(e, '&');
+        put_bytes(e, n.anchor, n.anchor_len);
+        wrote = true;
+    }
+    ret wrote;
+}
+
+fun has_props(n: *Node) bool {
+    ret n.tag_text != nil || n.anchor != nil;
+}
+
+fun is_space(c: u8) bool {
+    ret c == ' ' || c == '\t';
+}
+
+# whether the text reads back as the same plain scalar
+fun plain_safe(t: *u8, len: usize) bool {
+    if (len == 0) { ret false; }
+    val first: u8 = t[0];
+    if (is_space(first) || is_space(t[len - 1]))                                                                                       { ret false; }
+    if (first == '[' || first == ']' || first == '{' || first == '}' || first == ',' || first == '#' || first == '&' || first == '*')  { ret false; }
+    if (first == '!' || first == '|' || first == '>' || first == '\'' || first == '"' || first == '%' || first == '@' || first == '`') { ret false; }
+    if ((first == '-' || first == '?' || first == ':') && (len == 1 || is_space(t[1])))                                                { ret false; }
+    if (has_prefix(t, len, "---") || has_prefix(t, len, "..."))                                                                        { ret false; }
+    if (t[len - 1] == ':')                                                                                                             { ret false; }
+
+    var i: usize = 0;
+    for (i < len) {
+        val c: u8 = t[i];
+        if (c < 0x20 || c == 0x7f)                   { ret false; }
+        if (c == ':' && is_space(t[i + 1]))          { ret false; }
+        if (c == '#' && i > 0 && is_space(t[i - 1])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun single_ok(t: *u8, len: usize) bool {
+    var i: usize = 0;
+    for (i < len) {
+        if ((t[i] < 0x20 && t[i] != '\t') || t[i] == 0x7f) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# whether the text can be a block scalar that reads back byte for byte
+fun literal_ok(t: *u8, len: usize) bool {
+    var body: bool  = false;
+    var i:    usize = 0;
+    for (i < len) {
+        val c: u8 = t[i];
+        if (c == '\n') {
+            i = i + 1;
+            cnt;
+        }
+        if ((c < 0x20 && c != '\t') || c == 0x7f) { ret false; }
+        body = true;
+        i    = i + 1;
+    }
+    ret body;
+}
+
+fun form_of(n: *Node) Form {
+    val t:   *u8   = n.text;
+    val len: usize = n.text_len;
+    if (n.style == node.PLAIN) {
+        if (len == 0)           { ret EMPTY; }
+        if (plain_safe(t, len)) { ret PLAIN; }
+        if (single_ok(t, len))  { ret SINGLE; }
+        ret DOUBLE;
+    }
+    if (n.style == node.SINGLE && single_ok(t, len))                               { ret SINGLE; }
+    if ((n.style == node.LITERAL || n.style == node.FOLDED) && literal_ok(t, len)) { ret LITERAL; }
+    ret DOUBLE;
+}
+
+fun put_single(e: *Emit, t: *u8, len: usize) {
+    put_byte(e, '\'');
+    var i: usize = 0;
+    for (i < len) {
+        if (t[i] == '\'') { put_byte(e, '\''); }
+        put_byte(e, t[i]);
+        i = i + 1;
+    }
+    put_byte(e, '\'');
+}
+
+fun put_double(e: *Emit, t: *u8, len: usize) {
+    put_byte(e, '"');
+    var i: usize = 0;
+    for (i < len) {
+        val c: u8 = t[i];
+        if (c == '"')  { put(e, "\\\""); }
+        or (c == '\\') { put(e, "\\\\"); }
+        or (c == '\n') { put(e, "\\n"); }
+        or (c == '\t') { put(e, "\\t"); }
+        or (c == '\r') { put(e, "\\r"); }
+        or (c == 0)    { put(e, "\\0"); }
+        or (c == 7)    { put(e, "\\a"); }
+        or (c == 8)    { put(e, "\\b"); }
+        or (c == 11)   { put(e, "\\v"); }
+        or (c == 12)   { put(e, "\\f"); }
+        or (c == 27)   { put(e, "\\e"); }
+        or (c < 0x20 || c == 0x7f) {
+            put(e, "\\x");
+            put_hex(e, c);
+        }
+        or { put_byte(e, c); }
+        i = i + 1;
+    }
+    put_byte(e, '"');
+}
+
+# the scalar text as it is written on one line, without a block scalar
+fun put_inline(e: *Emit, n: *Node, form: Form) {
+    if (form == PLAIN)  { put_bytes(e, n.text, n.text_len); }
+    or (form == SINGLE) { put_single(e, n.text, n.text_len); }
+    or (form == DOUBLE) { put_double(e, n.text, n.text_len); }
+}
+
+# the header and lines of a block scalar after the properties, ending with a newline
+fun put_literal(e: *Emit, n: *Node, body: usize) {
+    val t:   *u8   = n.text;
+    val len: usize = n.text_len;
+    var end: usize = len;
+    for (end > 0 && t[end - 1] == '\n') {
+        end = end - 1;
+    }
+    val trailing: usize = len - end;
+
+    var lead: usize = 0;
+    for (lead < len && t[lead] == '\n') {
+        lead = lead + 1;
+    }
+    put_byte(e, '|');
+    if (is_space(t[lead])) { put_byte(e, '2'); }
+    if (trailing == 0)     { put_byte(e, '-'); }
+    or (trailing > 1)      { put_byte(e, '+'); }
+    put_byte(e, '\n');
+
+    var start: usize = 0;
+    for (start <= end) {
+        var stop: usize = start;
+        for (stop < end && t[stop] != '\n') {
+            stop = stop + 1;
+        }
+        if (stop > start) {
+            put_spaces(e, body);
+            put_bytes(e, ?t[start], stop - start);
+        }
+        put_byte(e, '\n');
+        start = stop + 1;
+    }
+    var extra: usize = 1;
+    for (extra < trailing) {
+        put_byte(e, '\n');
+        extra = extra + 1;
+    }
+}
+
+fun put_alias(e: *Emit, n: *Node) {
+    if (n.target == nil || n.target.anchor == nil) {
+        fault(e, EmitError.unanchored{mark_of(n)});
+        ret;
+    }
+    put_byte(e, '*');
+    put_bytes(e, n.target.anchor, n.target.anchor_len);
+}
+
+fun lead(e: *Emit, pl: Place) {
+    if (pl.mode != ROOT) { put_byte(e, ' '); }
+}
+
+fun emit_node(e: *Emit, n: *Node, pl: Place, depth: usize) {
+    if (e.failed) { ret; }
+
+    if (n.kind == node.ALIAS) {
+        lead(e, pl);
+        put_alias(e, n);
+        put_byte(e, '\n');
+        ret;
+    }
+
+    if (n.kind == node.SCALAR) {
+        val form: Form = form_of(n);
+        if (form == EMPTY && !has_props(n)) {
+            put_byte(e, '\n');
+            ret;
+        }
+        lead(e, pl);
+        val wrote: bool = put_props(e, n);
+        if (form == EMPTY) {
+            put_byte(e, '\n');
+            ret;
+        }
+        if (wrote) { put_byte(e, ' '); }
+        if (form == LITERAL) {
+            put_literal(e, n, pl.body);
+            ret;
+        }
+        put_inline(e, n, form);
+        put_byte(e, '\n');
+        ret;
+    }
+
+    if (n.count == 0) {
+        lead(e, pl);
+        val wrote: bool = put_props(e, n);
+        if (wrote)                   { put_byte(e, ' '); }
+        if (n.kind == node.SEQUENCE) { put(e, "[]\n"); }
+        or                           { put(e, "{}\n"); }
+        ret;
+    }
+
+    if (depth + 1 > e.limits.max_depth) {
+        fault(e, EmitError.depth{mark_of(n)});
+        ret;
+    }
+
+    if (pl.mode == INDICATOR && !has_props(n)) {
+        put_byte(e, ' ');
+        emit_collection(e, n, pl.child, true, depth + 1);
+        ret;
+    }
+    if (has_props(n)) {
+        lead(e, pl);
+        put_props(e, n);
+        put_byte(e, '\n');
+    }
+    or {
+        if (pl.mode != ROOT) { put_byte(e, '\n'); }
+    }
+    emit_collection(e, n, pl.child, false, depth + 1);
+}
+
+# whether a key can be written before its colon on one line
+fun simple_key(n: *Node) bool {
+    if (n.kind == node.ALIAS)                      { ret true; }
+    if (n.kind != node.SCALAR || n.text_len > 200) { ret false; }
+    val form: Form = form_of(n);
+    ret form != EMPTY && form != LITERAL;
+}
+
+fun put_key(e: *Emit, n: *Node) {
+    if (n.kind == node.ALIAS) {
+        put_alias(e, n);
+        put_byte(e, ' ');
+        ret;
+    }
+    if (put_props(e, n)) { put_byte(e, ' '); }
+    put_inline(e, n, form_of(n));
+}
+
+fun emit_collection(e: *Emit, n: *Node, indent: usize, compact: bool, depth: usize) {
+    var i: usize = 0;
+    for (i < n.count && !e.failed) {
+        if (i > 0 || !compact) { put_spaces(e, indent); }
+        if (n.kind == node.SEQUENCE) {
+            put_byte(e, '-');
+            emit_node(e, n.items[i], place_indicator(indent), depth);
+        }
+        or {
+            val key:   *Node = n.items[i * 2];
+            val value: *Node = n.items[i * 2 + 1];
+            if (simple_key(key)) {
+                put_key(e, key);
+                put_byte(e, ':');
+                emit_node(e, value, place_key(indent), depth);
+            }
+            or {
+                put_byte(e, '?');
+                emit_node(e, key, place_indicator(indent), depth);
+                put_spaces(e, indent);
+                put_byte(e, ':');
+                emit_node(e, value, place_indicator(indent), depth);
+            }
+        }
+        i = i + 1;
+    }
+}
+
+# write a tree as one document, without a document marker
+pub fun write_node(w: *writer.Writer, n: *Node) err[EmitError] {
+    ret write_node_with(w, n, error.limits_default());
+}
+
+# write a tree as one document under the given limits
+pub fun write_node_with(w: *writer.Writer, n: *Node, limits: Limits) err[EmitError] {
+    var e: Emit = Emit{w: w, limits: limits, failed: false, error: EmitError.depth{error.mark_start()}};
+    emit_node(?e, n, place_root(), 0);
+    if (e.failed) { ret err[EmitError].err{e.error}; }
+    ret err[EmitError].ok{};
+}
+
+# write every document of a stream, each after a document marker
+pub fun write_stream(w: *writer.Writer, s: *Stream) err[EmitError] {
+    ret write_stream_with(w, s, error.limits_default());
+}
+
+# write every document of a stream under the given limits
+pub fun write_stream_with(w: *writer.Writer, s: *Stream, limits: Limits) err[EmitError] {
+    var e: Emit  = Emit{w: w, limits: limits, failed: false, error: EmitError.depth{error.mark_start()}};
+    var i: usize = 0;
+    for (i < s.docs.len && !e.failed) {
+        put(?e, "---");
+        emit_node(?e, s.docs.data[i].root, place_marker(), 0);
+        i = i + 1;
+    }
+    if (e.failed) { ret err[EmitError].err{e.error}; }
+    ret err[EmitError].ok{};
+}
+
+$if (capability.HOSTED) {
+    use std.allocator;
+    use std.allocator.page;
+
+    use yaml.parse;
+
+    rec Sink {
+        data: [8192]u8;
+        len:  usize;
+    }
+
+    #[testing]
+    fun sink_write(ctx: ptr, buf: *u8, n: usize) res[usize, WriteError] {
+        val s: *Sink = ctx::*Sink;
+        var i: usize = 0;
+        for (i < n && s.len < 8192) {
+            s.data[s.len] = buf[i];
+            s.len         = s.len + 1;
+            i             = i + 1;
+        }
+        ret res[usize, WriteError].ok{n};
+    }
+
+    #[testing]
+    fun sink_writer(s: *Sink) writer.Writer {
+        s.len = 0;
+        ret writer.Writer{ctx: s::ptr, f_write: sink_write};
+    }
+
+    # a tree with every kind of node, written and read back to an equal tree
+    test write__round_trip {
+        val src: str = "--- !tapi-tbd\ntbd-version: 4\ntargets: [ x86_64-macos, arm64-macos ]\nuuids:\n  - target: x86_64-macos\n    value: 00000000-0000-0000-0000-000000000000\nanchored: &a {x: 1, y: [a, b]}\ncopy: *a\nempty_seq: []\nempty_map: {}\nempty:\nquoted: \"tab\\there \\u00e9 \\x01\"\nsingle: 'it''s'\nlooks: \"123\"\nnullish: 'null'\ncolon: \"a: b\"\ndash: \"- x\"\nhash: \"a #b\"\nblank: ''\nmulti: \"line one\\nline two\"\nlit: |\n  keep\n   indented\n\n  more\nclip: |-\n  strip\nkeep: |+\n  kept\n\nfold: >\n  folded\n  text\n? [complex, key]\n: value\n? {a: b}\n: other\n? |\n  block key\n: v\n--- \n- &s shared\n- *s\n- !!str 123\n- \"  lead\"\n- !local\n- &e\n- [a, [b, c], {d: e}]\n- - nested\n  - seq\n- !t &u tagged\n- ! non\n- !<tag:x,2000:a%20b> verbatim\n--- plain root\n--- !t tagged root\n--- \"quoted root\"\n---\n--- |\n  literal root\n";
+        var a:   allocator.Allocator;
+        page.make(?a);
+
+        val first: res[Stream, error.Error] = parse.parse(src, str_len(src), ?a);
+        if (sel first.err) { ret 1; }
+        var one: Stream = first.ok;
+
+        var out1:  Sink;
+        var w1:    writer.Writer  = sink_writer(?out1);
+        val wrote: err[EmitError] = write_stream(?w1, ?one);
+        if (sel wrote.err) { ret 2; }
+
+        val second: res[Stream, error.Error] = parse.parse(?out1.data[0], out1.len, ?a);
+        if (sel second.err) { ret 3; }
+        var two: Stream = second.ok;
+        if (parse.stream_count(?one) != parse.stream_count(?two)) { ret 4; }
+        var i: usize = 0;
+        for (i < parse.stream_count(?one)) {
+            if (!node.node_equal(one.docs.data[i].root, two.docs.data[i].root)) { ret (10 + i)::i32; }
+            i = i + 1;
+        }
+
+        var out2: Sink;
+        var w2:   writer.Writer = sink_writer(?out2);
+        write_stream(?w2, ?two);
+        if (out1.len != out2.len || !node.bytes_equal(?out1.data[0], out1.len, ?out2.data[0])) { ret 5; }
+        parse.dnit(?one);
+        parse.dnit(?two);
+        ret 0;
+    }
+}
