@@ -1,9 +1,9 @@
 [project]
 id = "yaml"
 version = "0.1.0"
-mach = "^6.10"
+mach = "^6"
 src = "src"
-out = "out/{target.name}/{profile.name}"
+work = "out/{target.name}/{profile.name}"
 
 [target.linux-x86_64]
 isa = "x86_64"
@@ -34,8 +34,9 @@ abi = "aapcs64"
 [artifact.yaml]
 kind = "static"
 default = true
+export = true
 entry = "lib/yaml.mach"
-out = "lib/yaml"
+out = "{project.work}/lib/yaml"
 targets = ["*"]
 link = ["kernel32"]
 need = []
@@ -50,19 +51,15 @@ export = false
 
 [profile.debug]
 default = true
-opt = 0
+optimize = false
 debug = true
 simd = "scalarize"
-vectorize = false
-float_reassoc = false
 
 [profile.release]
-opt = 2
+optimize = true
 debug = false
 simd = "scalarize"
-vectorize = true
-float_reassoc = false
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^9.5"
+ref = "branch/dev"
