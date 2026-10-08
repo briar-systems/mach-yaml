@@ -1,7 +1,7 @@
 # the reader: text to a tree of nodes
 
 use std.allocator;
-use std.crypto.hash.siphash;
+use std.collections.sort;
 use std.memory.raw_copy;
 use std.system.capability;
 use std.types.bool.bool;
@@ -15,6 +15,7 @@ use std.types.string.str;
 
 use std.collections.map;
 use vec: std.collections.vector;
+use yaml.core;
 use yaml.error;
 use yaml.error.Error;
 use yaml.error.Limits;
@@ -67,7 +68,6 @@ rec Parser {
     anchors:  map.Map[str, *Node];
     tags:     vec.Vector[TagDirective];
     expanded: usize;
-    sip:      siphash.Key;
 }
 
 val CORE_TAG_PREFIX: str = "tag:yaml.org,2002:";
@@ -89,20 +89,13 @@ pub fun parse_with(src: *u8, src_len: usize, alloc: *allocator.Allocator, limits
     p.tags     = vec.init[TagDirective](alloc);
     p.expanded = 0;
 
-    val sip:   opt[siphash.Key]     = draw_key();
     var r:     err[Error];
     val begun: err[allocator.Error] = scan.init(?p.sc, src, src_len, alloc, limits);
     if (sel begun.err) {
         r = err[Error].err{Error.alloc{error.Refusal{cause: begun.err, at: error.mark_start()}}};
     }
     or {
-        if (sel sip.some) {
-            p.sip = sip.some;
-            r     = parse_stream(?p, ?stream);
-        }
-        or {
-            r = err[Error].err{Error.alloc{error.Refusal{cause: allocator.Error.exhausted{}, at: error.mark_start()}}};
-        }
+        r = parse_stream(?p, ?stream);
     }
     release(?p);
     if (sel r.err) {
@@ -110,17 +103,6 @@ pub fun parse_with(src: *u8, src_len: usize, alloc: *allocator.Allocator, limits
         ret res[Stream, Error].err{r.err};
     }
     ret res[Stream, Error].ok{stream};
-}
-
-$if (capability.HAS_ENTROPY) {
-    fun draw_key() opt[siphash.Key] {
-        ret siphash.random_key();
-    }
-}
-$or {
-    fun draw_key() opt[siphash.Key] {
-        ret opt[siphash.Key].some{siphash.Key{k0: 0, k1: 0}};
-    }
 }
 
 fun release(p: *Parser) {
@@ -544,88 +526,127 @@ fun add_item(p: *Parser, seq: *Node, item: *Node, at: Mark) err[Error] {
     ret pass();
 }
 
-# the keys of a mapping by a keyed hash, built once the mapping outgrows a linear scan
-rec KeySet {
-    active: bool;
-    seen:   map.Map[u64, usize];
+# a mapping key with the order it is checked in
+rec KeyRef {
+    key:   *Node;
+    class: u8;
+    index: usize;
 }
 
 val LINEAR_KEYS: usize = 16;
 
-fun key_hash(p: *Parser, key: *Node) u64 {
-    var st:    siphash.State = siphash.init(p.sip);
-    var plain: u64           = 0;
-    if (key.style == node.PLAIN) { plain = 1; }
-    siphash.update_u64(?st, plain);
-    siphash.update_u64(?st, key.tag_len::u64);
-    if (key.tag_len > 0)  { siphash.update(?st, key.tag_text, key.tag_len); }
-    if (key.text_len > 0) { siphash.update(?st, key.text, key.text_len); }
-    ret siphash.final(?st);
+# how the core schema tells scalar keys apart: by tag, or else by what the text reads as
+fun key_class(n: *Node) u8 {
+    if (n.tag_len > 0)         { ret 255; }
+    if (n.style == node.PLAIN) { ret core.plain_kind(n.text, n.text_len); }
+    ret core.STR;
 }
 
-fun keyset_free(set: *KeySet) {
-    if (set.active) { map.dnit[u64, usize](?set.seen); }
-    set.active = false;
+fun compare_bytes(a: *u8, b: *u8, n: usize) i64 {
+    var i: usize = 0;
+    for (i < n) {
+        if (a[i] != b[i]) {
+            if (a[i] < b[i]) { ret -1; }
+            ret 1;
+        }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+fun compare_usize(a: usize, b: usize) i64 {
+    if (a < b) { ret -1; }
+    if (a > b) { ret 1; }
+    ret 0;
+}
+
+fun compare_keys(a: *KeyRef, b: *KeyRef) i64 {
+    if (a.class != b.class)             { ret compare_usize(a.class::usize, b.class::usize); }
+    if (a.key.tag_len != b.key.tag_len) { ret compare_usize(a.key.tag_len, b.key.tag_len); }
+    val tags: i64 = compare_bytes(a.key.tag_text, b.key.tag_text, a.key.tag_len);
+    if (tags != 0)                        { ret tags; }
+    if (a.key.text_len != b.key.text_len) { ret compare_usize(a.key.text_len, b.key.text_len); }
+    val texts: i64 = compare_bytes(a.key.text, b.key.text, a.key.text_len);
+    if (texts != 0) { ret texts; }
+    ret compare_usize(a.index, b.index);
 }
 
 fun is_scalar_key(key: *Node) bool {
     ret node.node_resolve(key).kind == node.SCALAR;
 }
 
-# whether key repeats a key of the mapping, comparing only against keys of the same sort
-fun scan_keys(m: *Node, key: *Node) bool {
-    val scalar: bool  = is_scalar_key(key);
-    var i:      usize = 0;
+# the index of the first key that repeats an earlier one, or the count when none does
+fun first_repeat_small(m: *Node) usize {
+    var i: usize = 1;
     for (i < m.count) {
-        val other: *Node = m.items[i * 2];
-        if (is_scalar_key(other) == scalar && node.node_key_equal(other, key)) { ret true; }
+        var j: usize = 0;
+        for (j < i) {
+            if (node.node_key_equal(m.items[j * 2], m.items[i * 2])) { ret i; }
+            j = j + 1;
+        }
         i = i + 1;
     }
-    ret false;
+    ret m.count;
 }
 
-fun check_key(p: *Parser, set: *KeySet, m: *Node, key: *Node, at: Mark) err[Error] {
-    val dup: err[Error] = fail(Error.duplicate_key{at});
-    if (!is_scalar_key(key) || (!set.active && m.count < LINEAR_KEYS)) {
-        if (scan_keys(m, key)) { ret dup; }
-        ret pass();
-    }
+# the same for a large mapping: scalar keys by sorting, other keys pairwise
+fun first_repeat_large(p: *Parser, m: *Node, at: Mark) res[usize, Error] {
+    var best: usize = m.count;
 
-    if (!set.active) {
-        set.seen   = map.init[u64, usize](p.alloc);
-        set.active = true;
-        var i: usize = 0;
-        for (i < m.count) {
-            if (is_scalar_key(m.items[i * 2])) {
-                val h: u64 = key_hash(p, node.node_resolve(m.items[i * 2]));
-                if (!map.contains[u64, usize](?set.seen, ?h)) {
-                    val put: res[bool, allocator.Error] = map.insert[u64, usize](?set.seen, h, i);
-                    if (sel put.err) { ret fail(refused(p, put.err, at)); }
+    var i: usize = 1;
+    for (i < best) {
+        if (!is_scalar_key(m.items[i * 2])) {
+            var j: usize = 0;
+            for (j < i) {
+                if (!is_scalar_key(m.items[j * 2]) && node.node_key_equal(m.items[j * 2], m.items[i * 2])) {
+                    best = i;
+                    brk;
                 }
+                j = j + 1;
             }
-            i = i + 1;
         }
+        i = i + 1;
     }
 
-    var h:     u64         = key_hash(p, node.node_resolve(key));
-    val found: opt[*usize] = map.get[u64, usize](?set.seen, ?h);
-    if (sel found.some) {
-        if (node.node_key_equal(m.items[(@found.some) * 2], key)) { ret dup; }
-        if (scan_keys(m, key))                                    { ret dup; }
-        ret pass();
+    val got: res[*KeyRef, allocator.Error] = allocator.allocate[KeyRef](p.alloc, m.count);
+    if (sel got.err) { ret res[usize, Error].err{refused(p, got.err, at)}; }
+    val refs: *KeyRef = got.ok;
+    var n:    usize   = 0;
+    i = 0;
+    for (i < m.count) {
+        if (is_scalar_key(m.items[i * 2])) {
+            val resolved: *Node = node.node_resolve(m.items[i * 2]);
+            refs[n] = KeyRef{key: resolved, class: key_class(resolved), index: i};
+            n       = n + 1;
+        }
+        i = i + 1;
     }
-    val put: res[bool, allocator.Error] = map.insert[u64, usize](?set.seen, h, m.count);
-    if (sel put.err) { ret fail(refused(p, put.err, at)); }
-    ret pass();
+    sort.sort_by[KeyRef](refs, n, compare_keys);
+    i = 1;
+    for (i < n) {
+        if (refs[i].index < best && node.node_key_equal(refs[i - 1].key, refs[i].key)) { best = refs[i].index; }
+        i = i + 1;
+    }
+    allocator.deallocate[KeyRef](p.alloc, refs, m.count);
+    ret res[usize, Error].ok{best};
 }
 
-fun add_pair(p: *Parser, set: *KeySet, map_node: *Node, key: *Node, value: *Node, at: Mark) err[Error] {
-    val unique: err[Error] = check_key(p, set, map_node, key, at);
-    if (sel unique.err) {
-        node.dnit(p.alloc, key);
-        node.dnit(p.alloc, value);
-        ret unique;
+# refuse a finished mapping that holds a key twice, at the second one
+fun check_unique(p: *Parser, m: *Node, at: Mark) err[Error] {
+    if (m.count < 2) { ret pass(); }
+    var repeat: usize = m.count;
+    if (m.count < LINEAR_KEYS) { repeat = first_repeat_small(m); }
+    or {
+        val large: res[usize, Error] = first_repeat_large(p, m, at);
+        if (sel large.err) { ret fail(large.err); }
+        repeat = large.ok;
     }
+    if (repeat >= m.count) { ret pass(); }
+    val key: *Node = m.items[repeat * 2];
+    ret fail(Error.duplicate_key{Mark{offset: 0, line: key.line, column: key.column}});
+}
+
+fun add_pair(p: *Parser, map_node: *Node, key: *Node, value: *Node, at: Mark) err[Error] {
     val pushed: err[allocator.Error] = node.push_pair(p.alloc, map_node, key, value);
     if (sel pushed.err) {
         node.dnit(p.alloc, key);
@@ -728,13 +749,6 @@ fun parse_indentless_seq(p: *Parser, depth: usize) res[*Node, Error] {
 }
 
 fun parse_block_map(p: *Parser, depth: usize) res[*Node, Error] {
-    var set: KeySet;
-    val r:   res[*Node, Error] = parse_block_map_with(p, depth, ?set);
-    keyset_free(?set);
-    ret r;
-}
-
-fun parse_block_map_with(p: *Parser, depth: usize, set: *KeySet) res[*Node, Error] {
     val start: Token             = scan.take(?p.sc);
     val made:  res[*Node, Error] = new_collection(p, node.MAPPING, node.BLOCK, start.mark, depth);
     if (sel made.err) { ret made; }
@@ -789,11 +803,16 @@ fun parse_block_map_with(p: *Parser, depth: usize, set: *KeySet) res[*Node, Erro
             ret value;
         }
 
-        val added: err[Error] = add_pair(p, set, map_node, key.ok, value.ok, t.mark);
+        val added: err[Error] = add_pair(p, map_node, key.ok, value.ok, t.mark);
         if (sel added.err) {
             node.dnit(p.alloc, map_node);
             ret res[*Node, Error].err{added.err};
         }
+    }
+    val unique: err[Error] = check_unique(p, map_node, start.mark);
+    if (sel unique.err) {
+        node.dnit(p.alloc, map_node);
+        ret res[*Node, Error].err{unique.err};
     }
     ret made;
 }
@@ -806,7 +825,7 @@ fun flow_unclosed(t: Token, start: Mark) Error {
 }
 
 # one key and value of a flow mapping, or of the single pair mapping inside a flow sequence
-fun parse_flow_pair(p: *Parser, set: *KeySet, t: Token, depth: usize, pair: *Node) err[Error] {
+fun parse_flow_pair(p: *Parser, t: Token, depth: usize, pair: *Node) err[Error] {
     var key: res[*Node, Error];
     if (t.kind == scan.TOK_KEY) {
         scan.take(?p.sc);
@@ -834,7 +853,7 @@ fun parse_flow_pair(p: *Parser, set: *KeySet, t: Token, depth: usize, pair: *Nod
         node.dnit(p.alloc, key.ok);
         ret fail(value.err);
     }
-    ret add_pair(p, set, pair, key.ok, value.ok, t.mark);
+    ret add_pair(p, pair, key.ok, value.ok, t.mark);
 }
 
 fun parse_flow_seq(p: *Parser, depth: usize) res[*Node, Error] {
@@ -880,8 +899,7 @@ fun parse_flow_seq(p: *Parser, depth: usize) res[*Node, Error] {
                 node.dnit(p.alloc, seq);
                 ret pm;
             }
-            var single: KeySet;
-            val pair:   err[Error] = parse_flow_pair(p, ?single, t, depth + 1, pm.ok);
+            val pair: err[Error] = parse_flow_pair(p, t, depth + 1, pm.ok);
             if (sel pair.err) {
                 node.dnit(p.alloc, pm.ok);
                 node.dnit(p.alloc, seq);
@@ -914,13 +932,6 @@ fun parse_flow_seq(p: *Parser, depth: usize) res[*Node, Error] {
 }
 
 fun parse_flow_map(p: *Parser, depth: usize) res[*Node, Error] {
-    var set: KeySet;
-    val r:   res[*Node, Error] = parse_flow_map_with(p, depth, ?set);
-    keyset_free(?set);
-    ret r;
-}
-
-fun parse_flow_map_with(p: *Parser, depth: usize, set: *KeySet) res[*Node, Error] {
     val start: Token             = scan.take(?p.sc);
     val made:  res[*Node, Error] = new_collection(p, node.MAPPING, node.FLOW, start.mark, depth);
     if (sel made.err) { ret made; }
@@ -962,7 +973,7 @@ fun parse_flow_map_with(p: *Parser, depth: usize, set: *KeySet) res[*Node, Error
             ret res[*Node, Error].err{flow_unclosed(t, start.mark)};
         }
         if (t.kind == scan.TOK_KEY || t.kind == scan.TOK_VALUE) {
-            val pair: err[Error] = parse_flow_pair(p, set, t, depth, map_node);
+            val pair: err[Error] = parse_flow_pair(p, t, depth, map_node);
             if (sel pair.err) {
                 node.dnit(p.alloc, map_node);
                 ret res[*Node, Error].err{pair.err};
@@ -980,12 +991,17 @@ fun parse_flow_map_with(p: *Parser, depth: usize, set: *KeySet) res[*Node, Error
                 node.dnit(p.alloc, map_node);
                 ret value;
             }
-            val added: err[Error] = add_pair(p, set, map_node, key.ok, value.ok, t.mark);
+            val added: err[Error] = add_pair(p, map_node, key.ok, value.ok, t.mark);
             if (sel added.err) {
                 node.dnit(p.alloc, map_node);
                 ret res[*Node, Error].err{added.err};
             }
         }
+    }
+    val unique: err[Error] = check_unique(p, map_node, start.mark);
+    if (sel unique.err) {
+        node.dnit(p.alloc, map_node);
+        ret res[*Node, Error].err{unique.err};
     }
     ret made;
 }
