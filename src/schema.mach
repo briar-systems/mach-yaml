@@ -1,0 +1,358 @@
+# the core schema: how a scalar reads as null, bool, int, float or string
+
+use std.system.capability;
+use std.text.parse;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+
+use yaml.node;
+use yaml.node.Node;
+
+pub def Core: u8;
+pub val NULL:  Core = 0;
+pub val BOOL:  Core = 1;
+pub val INT:   Core = 2;
+pub val FLOAT: Core = 3;
+pub val STR:   Core = 4;
+pub val OTHER: Core = 5;
+
+val TAG_NULL:  str = "tag:yaml.org,2002:null";
+val TAG_BOOL:  str = "tag:yaml.org,2002:bool";
+val TAG_INT:   str = "tag:yaml.org,2002:int";
+val TAG_FLOAT: str = "tag:yaml.org,2002:float";
+val TAG_STR:   str = "tag:yaml.org,2002:str";
+
+fun is_digit(c: u8) bool {
+    ret c >= '0' && c <= '9';
+}
+
+fun is_hex(c: u8) bool {
+    ret is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+fun text_is(text: *u8, len: usize, a: str, b: str, c: str) bool {
+    ret node.bytes_equal(text, len, a) || node.bytes_equal(text, len, b) || node.bytes_equal(text, len, c);
+}
+
+fun null_text(text: *u8, len: usize) bool {
+    ret len == 0 || node.bytes_equal(text, len, "~") || text_is(text, len, "null", "Null", "NULL");
+}
+
+# 1 for true, 0 for false, -1 for neither
+fun bool_text(text: *u8, len: usize) i32 {
+    if (text_is(text, len, "true", "True", "TRUE"))    { ret 1; }
+    if (text_is(text, len, "false", "False", "FALSE")) { ret 0; }
+    ret -1;
+}
+
+# the number of leading sign bytes
+fun sign_len(text: *u8, len: usize) usize {
+    if (len > 0 && (text[0] == '-' || text[0] == '+')) { ret 1; }
+    ret 0;
+}
+
+fun all_digits(text: *u8, from: usize, len: usize, hex: bool, octal: bool) bool {
+    if (from >= len) { ret false; }
+    var i: usize = from;
+    for (i < len) {
+        val c: u8 = text[i];
+        if (hex) {
+            if (!is_hex(c)) { ret false; }
+        }
+        or (octal) {
+            if (c < '0' || c > '7') { ret false; }
+        }
+        or {
+            if (!is_digit(c)) { ret false; }
+        }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun int_text(text: *u8, len: usize) bool {
+    if (len > 2 && text[0] == '0' && text[1] == 'x') { ret all_digits(text, 2, len, true, false); }
+    if (len > 2 && text[0] == '0' && text[1] == 'o') { ret all_digits(text, 2, len, false, true); }
+    ret all_digits(text, sign_len(text, len), len, false, false);
+}
+
+fun special_float(text: *u8, len: usize) i32 {
+    val at: usize = sign_len(text, len);
+    if (len - at == 4 && text[at] == '.') {
+        val body: *u8 = (text::usize + at + 1)::*u8;
+        if (text_is(body, 3, "inf", "Inf", "INF"))            { ret 1; }
+        if (at == 0 && text_is(body, 3, "nan", "NaN", "NAN")) { ret 2; }
+    }
+    ret 0;
+}
+
+fun float_text(text: *u8, len: usize) bool {
+    if (special_float(text, len) != 0) { ret true; }
+    var i:      usize = sign_len(text, len);
+    var digits: usize = 0;
+    for (i < len && is_digit(text[i])) {
+        i      = i + 1;
+        digits = digits + 1;
+    }
+    var fraction: usize = 0;
+    if (i < len && text[i] == '.') {
+        i = i + 1;
+        for (i < len && is_digit(text[i])) {
+            i        = i + 1;
+            fraction = fraction + 1;
+        }
+    }
+    if (digits == 0 && fraction == 0) { ret false; }
+    if (i < len && (text[i] == 'e' || text[i] == 'E')) {
+        i = i + 1;
+        if (i < len && (text[i] == '-' || text[i] == '+')) { i = i + 1; }
+        var exp: usize = 0;
+        for (i < len && is_digit(text[i])) {
+            i   = i + 1;
+            exp = exp + 1;
+        }
+        if (exp == 0) { ret false; }
+    }
+    ret i == len;
+}
+
+fun tag_kind(n: *Node) Core {
+    if (node.node_tag_is(n, TAG_NULL))                            { ret NULL; }
+    if (node.node_tag_is(n, TAG_BOOL))                            { ret BOOL; }
+    if (node.node_tag_is(n, TAG_INT))                             { ret INT; }
+    if (node.node_tag_is(n, TAG_FLOAT))                           { ret FLOAT; }
+    if (node.node_tag_is(n, TAG_STR) || node.node_tag_is(n, "!")) { ret STR; }
+    ret OTHER;
+}
+
+# how the core schema reads a node
+pub fun core_kind(n: *Node) Core {
+    val r: *Node = node.node_resolve(n);
+    if (r.kind != node.SCALAR)              { ret OTHER; }
+    if (r.tag_text != nil)                  { ret tag_kind(r); }
+    if (r.style != node.PLAIN)              { ret STR; }
+    if (null_text(r.text, r.text_len))      { ret NULL; }
+    if (bool_text(r.text, r.text_len) >= 0) { ret BOOL; }
+    if (int_text(r.text, r.text_len))       { ret INT; }
+    if (float_text(r.text, r.text_len))     { ret FLOAT; }
+    ret STR;
+}
+
+# whether the node is null
+pub fun node_is_null(n: *Node) bool {
+    ret core_kind(n) == NULL;
+}
+
+# the value of a boolean, or none when the node is not one
+pub fun node_bool(n: *Node) opt[bool] {
+    if (core_kind(n) != BOOL) { ret opt[bool].none{}; }
+    val r: *Node = node.node_resolve(n);
+    val v: i32   = bool_text(r.text, r.text_len);
+    if (v < 0) { ret opt[bool].none{}; }
+    ret opt[bool].some{v == 1};
+}
+
+fun digit_value(c: u8) u64 {
+    if (is_digit(c))          { ret (c - '0')::u64; }
+    if (c >= 'a' && c <= 'f') { ret (c - 'a')::u64 + 10; }
+    ret (c - 'A')::u64 + 10;
+}
+
+# the value of an integer in decimal, 0o octal or 0x hex, or none when the node
+pub fun node_int(n: *Node) opt[i64] {
+    if (core_kind(n) != INT) { ret opt[i64].none{}; }
+    val r:    *Node = node.node_resolve(n);
+    val text: *u8   = r.text;
+    val len:  usize = r.text_len;
+
+    var base:     u64   = 10;
+    var from:     usize = sign_len(text, len);
+    var negative: bool  = len > 0 && text[0] == '-';
+    if (len > 2 && text[0] == '0' && text[1] == 'x') {
+        base = 16;
+        from = 2;
+    }
+    or (len > 2 && text[0] == '0' && text[1] == 'o') {
+        base = 8;
+        from = 2;
+    }
+    if (from >= len) { ret opt[i64].none{}; }
+
+    val limit: u64   = 0x7FFFFFFFFFFFFFFF;
+    var value: u64   = 0;
+    var i:     usize = from;
+    for (i < len) {
+        val d: u64 = digit_value(text[i]);
+        if (d >= base) { ret opt[i64].none{}; }
+        if (value > (limit - d) / base) {
+            # the one value past the limit that still fits is the most negative
+            if (!(negative && value * base + d == limit + 1)) { ret opt[i64].none{}; }
+            if (i + 1 != len)                                 { ret opt[i64].none{}; }
+            ret opt[i64].some{0 - limit::i64 - 1};
+        }
+        value = value * base + d;
+        i     = i + 1;
+    }
+    if (negative) { ret opt[i64].some{0 - value::i64}; }
+    ret opt[i64].some{value::i64};
+}
+
+# the value of a float, or of an integer widened, or none when the node is
+pub fun node_float(n: *Node) opt[f64] {
+    val kind: Core = core_kind(n);
+    if (kind != FLOAT && kind != INT) { ret opt[f64].none{}; }
+    val r: *Node = node.node_resolve(n);
+
+    if (kind == INT) {
+        val i: opt[i64] = node_int(r);
+        if (!sel i.some) { ret opt[f64].none{}; }
+        ret opt[f64].some{i.some::f64};
+    }
+
+    val special: i32 = special_float(r.text, r.text_len);
+    if (special == 1) {
+        var inf: str = "inf";
+        if (r.text[0] == '-') { inf = "-inf"; }
+        val v: res[f64, parse.ParseError] = parse.parse_f64(inf);
+        if (sel v.ok) { ret opt[f64].some{v.ok}; }
+        ret opt[f64].none{};
+    }
+    if (special == 2) {
+        val v: res[f64, parse.ParseError] = parse.parse_f64("nan");
+        if (sel v.ok) { ret opt[f64].some{v.ok}; }
+        ret opt[f64].none{};
+    }
+    if (!float_text(r.text, r.text_len)) { ret opt[f64].none{}; }
+    val v: res[f64, parse.ParseError] = parse.parse_f64_len(r.text, r.text_len);
+    if (sel v.ok) { ret opt[f64].some{v.ok}; }
+    ret opt[f64].none{};
+}
+
+$if (capability.HOSTED) {
+    use std.allocator;
+    use std.allocator.page;
+    use std.types.string.str_len;
+
+    rec Row {
+        text:    str;
+        style:   node.Style;
+        tag:     str;
+        kind:    Core;
+        ival:    i64;
+        fval:    f64;
+        special: u8;
+    }
+
+    #[testing]
+    fun row(text: str, kind: Core, ival: i64, fval: f64, special: u8) Row {
+        ret Row{text: text, style: node.PLAIN, tag: "", kind: kind, ival: ival, fval: fval, special: special};
+    }
+
+    #[testing]
+    fun styled(text: str, style: node.Style, tag: str, kind: Core, ival: i64, special: u8) Row {
+        ret Row{text: text, style: style, tag: tag, kind: kind, ival: ival, fval: 0.0, special: special};
+    }
+
+    # null, bool, int, float and string readings of plain, quoted and tagged scalars
+    test schema__core {
+        var a: allocator.Allocator;
+        page.make(?a);
+        val rows: [52]Row = [52]Row{
+            row("", NULL, 0, 0.0, 0),
+            row("~", NULL, 0, 0.0, 0),
+            row("null", NULL, 0, 0.0, 0),
+            row("Null", NULL, 0, 0.0, 0),
+            row("NULL", NULL, 0, 0.0, 0),
+            row("nul", STR, 0, 0.0, 0),
+            row("true", BOOL, 1, 0.0, 0),
+            row("True", BOOL, 1, 0.0, 0),
+            row("FALSE", BOOL, 0, 0.0, 0),
+            row("false", BOOL, 0, 0.0, 0),
+            row("yes", STR, 0, 0.0, 0),
+            row("tRUE", STR, 0, 0.0, 0),
+            row("0", INT, 0, 0.0, 0),
+            row("42", INT, 42, 0.0, 0),
+            row("-17", INT, -17, 0.0, 0),
+            row("+5", INT, 5, 0.0, 0),
+            row("007", INT, 7, 0.0, 0),
+            row("0o17", INT, 15, 0.0, 0),
+            row("0x1F", INT, 31, 0.0, 0),
+            row("0xff", INT, 255, 0.0, 0),
+            row("9223372036854775807", INT, 9223372036854775807, 0.0, 0),
+            row("-9223372036854775808", INT, -9223372036854775807 - 1, 0.0, 0),
+            row("9223372036854775808", INT, 0, 0.0, 4),
+            row("0x", STR, 0, 0.0, 0),
+            row("0o8", STR, 0, 0.0, 0),
+            row("1_000", STR, 0, 0.0, 0),
+            row("1.5", FLOAT, 0, 1.5, 0),
+            row("-0.25", FLOAT, 0, -0.25, 0),
+            row(".5", FLOAT, 0, 0.5, 0),
+            row("5.", FLOAT, 0, 5.0, 0),
+            row("1e3", FLOAT, 0, 1000.0, 0),
+            row("1.5E-2", FLOAT, 0, 0.015, 0),
+            row(".inf", FLOAT, 0, 0.0, 1),
+            row("+.Inf", FLOAT, 0, 0.0, 1),
+            row("-.INF", FLOAT, 0, 0.0, 2),
+            row(".NaN", FLOAT, 0, 0.0, 3),
+            row(".nan", FLOAT, 0, 0.0, 3),
+            row("1e", STR, 0, 0.0, 0),
+            row(".", STR, 0, 0.0, 0),
+            row("1.2.3", STR, 0, 0.0, 0),
+            row("-.nan", STR, 0, 0.0, 0),
+            styled("123", node.DOUBLE, "", STR, 0, 0),
+            styled("null", node.SINGLE, "", STR, 0, 0),
+            styled("true", node.LITERAL, "", STR, 0, 0),
+            styled("123", node.PLAIN, "tag:yaml.org,2002:str", STR, 0, 0),
+            styled("12", node.DOUBLE, "tag:yaml.org,2002:int", INT, 12, 0),
+            styled("123", node.PLAIN, "!", STR, 0, 0),
+            styled("x", node.PLAIN, "!tapi", OTHER, 0, 0),
+            styled("", node.PLAIN, "tag:yaml.org,2002:null", NULL, 0, 0),
+            styled("true", node.SINGLE, "tag:yaml.org,2002:bool", BOOL, 1, 0),
+            styled("abc", node.PLAIN, "tag:yaml.org,2002:int", INT, 0, 4),
+            styled("-3", node.PLAIN, "tag:yaml.org,2002:int", INT, -3, 0)
+        };
+
+        var i: usize = 0;
+        for (i < 52) {
+            val made: res[*Node, allocator.Error] = node.make_scalar(?a, rows[i].text, str_len(rows[i].text), rows[i].style);
+            if (sel made.err) { ret 1; }
+            val n: *Node = made.ok;
+            if (str_len(rows[i].tag) > 0) { node.set_tag(?a, n, rows[i].tag); }
+            val code: i32 = (100 + i)::i32;
+            if (core_kind(n) != rows[i].kind) { ret code; }
+
+            if (rows[i].kind == NULL && !node_is_null(n)) { ret code; }
+            if (rows[i].kind == BOOL) {
+                val b: opt[bool] = node_bool(n);
+                if (!sel b.some)                   { ret code; }
+                if ((b.some::i64) != rows[i].ival) { ret code; }
+            }
+            if (rows[i].kind == INT) {
+                val v: opt[i64] = node_int(n);
+                if (rows[i].special == 4) {
+                    if (sel v.some) { ret code; }
+                }
+                or {
+                    if (!sel v.some)            { ret code; }
+                    if (v.some != rows[i].ival) { ret code; }
+                }
+            }
+            if (rows[i].kind == FLOAT) {
+                val f: opt[f64] = node_float(n);
+                if (!sel f.some)                                    { ret code; }
+                if (rows[i].special == 0 && f.some != rows[i].fval) { ret code; }
+                if (rows[i].special == 1 && !(f.some > 1.0e308))    { ret code; }
+                if (rows[i].special == 2 && !(f.some < -1.0e308))   { ret code; }
+                if (rows[i].special == 3 && f.some == f.some)       { ret code; }
+            }
+            node.dnit(?a, n);
+            i = i + 1;
+        }
+        ret 0;
+    }
+}
