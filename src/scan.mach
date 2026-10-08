@@ -81,6 +81,9 @@ pub rec Scanner {
     allowed: bool;
     started: bool;
     done:    bool;
+    bad:     bool;
+    bad_at:  Mark;
+    cont:    usize;
 }
 
 rec Buf {
@@ -108,6 +111,8 @@ pub fun init(s: *Scanner, src: *u8, len: usize, alloc: *allocator.Allocator, lim
     s.allowed = true;
     s.started = false;
     s.done    = false;
+    s.bad     = false;
+    s.cont    = 0;
 
     var base:   SimpleKey;
     val pushed: res[usize, allocator.Error] = vec.push[SimpleKey](?s.keys, base);
@@ -238,9 +243,28 @@ fun printable(c: u8) bool {
     ret c >= 0x20 && c != 0x7f;
 }
 
+# note the first malformed UTF-8 sequence consumed, found at its lead byte
+fun check_utf8(s: *Scanner, c: u8) {
+    if (s.cont > 0) {
+        s.cont = s.cont - 1;
+        ret;
+    }
+    var cp: utf8.Codepoint;
+    val n:  usize = utf8.decode(?s.src[s.pos], s.len - s.pos, ?cp);
+    if (n > 0) {
+        s.cont = n - 1;
+        ret;
+    }
+    if (!s.bad) {
+        s.bad    = true;
+        s.bad_at = here(s);
+    }
+}
+
 # consume one byte, keeping the line and column
 fun skip(s: *Scanner) {
     val c: u8 = s.src[s.pos];
+    if (c >= 0x80) { check_utf8(s, c); }
     if (c == '\n') {
         s.line = s.line + 1;
         s.col  = 0;
@@ -1269,6 +1293,7 @@ pub fun peek(s: *Scanner) res[*Token, Error] {
         }
         if (s.done || !need_more(s)) { brk; }
         val fetched: err[Error] = fetch_next(s);
+        if (s.bad)           { ret res[*Token, Error].err{Error.character{s.bad_at}}; }
         if (sel fetched.err) { ret res[*Token, Error].err{fetched.err}; }
     }
     ret res[*Token, Error].ok{?s.queue.data[s.head]};

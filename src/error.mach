@@ -36,9 +36,11 @@ pub tag Error: u8 {
     alias:    Mark;
     unclosed: Mark;
     # content after a document that needs a document marker first
-    end:       Mark;
-    depth:     Mark;
-    expansion: Mark;
+    end: Mark;
+    # a mapping key that repeats an earlier one
+    duplicate_key: Mark;
+    depth:         Mark;
+    expansion:     Mark;
 }
 
 # bounds on what a read accepts from untrusted input
@@ -61,43 +63,45 @@ pub fun mark_start() Mark {
 
 # where a defect was found
 pub fun error_mark(e: Error) Mark {
-    if (sel e.alloc)        { ret e.alloc.at; }
-    if (sel e.syntax)       { ret e.syntax; }
-    if (sel e.tab)          { ret e.tab; }
-    if (sel e.key)          { ret e.key; }
-    if (sel e.unterminated) { ret e.unterminated; }
-    if (sel e.escape)       { ret e.escape; }
-    if (sel e.character)    { ret e.character; }
-    if (sel e.header)       { ret e.header; }
-    if (sel e.directive)    { ret e.directive; }
-    if (sel e.bad_tag)      { ret e.bad_tag; }
-    if (sel e.handle)       { ret e.handle; }
-    if (sel e.anchor)       { ret e.anchor; }
-    if (sel e.alias)        { ret e.alias; }
-    if (sel e.unclosed)     { ret e.unclosed; }
-    if (sel e.end)          { ret e.end; }
-    if (sel e.depth)        { ret e.depth; }
-    if (sel e.expansion)    { ret e.expansion; }
+    if (sel e.alloc)         { ret e.alloc.at; }
+    if (sel e.syntax)        { ret e.syntax; }
+    if (sel e.tab)           { ret e.tab; }
+    if (sel e.key)           { ret e.key; }
+    if (sel e.unterminated)  { ret e.unterminated; }
+    if (sel e.escape)        { ret e.escape; }
+    if (sel e.character)     { ret e.character; }
+    if (sel e.header)        { ret e.header; }
+    if (sel e.directive)     { ret e.directive; }
+    if (sel e.bad_tag)       { ret e.bad_tag; }
+    if (sel e.handle)        { ret e.handle; }
+    if (sel e.anchor)        { ret e.anchor; }
+    if (sel e.alias)         { ret e.alias; }
+    if (sel e.unclosed)      { ret e.unclosed; }
+    if (sel e.end)           { ret e.end; }
+    if (sel e.duplicate_key) { ret e.duplicate_key; }
+    if (sel e.depth)         { ret e.depth; }
+    if (sel e.expansion)     { ret e.expansion; }
     ret mark_start();
 }
 
 # the name of a defect, the case of Error it is
 pub fun error_name(e: Error) str {
-    if (sel e.alloc)        { ret "alloc"; }
-    if (sel e.syntax)       { ret "syntax"; }
-    if (sel e.tab)          { ret "tab"; }
-    if (sel e.key)          { ret "key"; }
-    if (sel e.unterminated) { ret "unterminated"; }
-    if (sel e.escape)       { ret "escape"; }
-    if (sel e.character)    { ret "character"; }
-    if (sel e.header)       { ret "header"; }
-    if (sel e.directive)    { ret "directive"; }
-    if (sel e.bad_tag)      { ret "tag"; }
-    if (sel e.handle)       { ret "handle"; }
-    if (sel e.anchor)       { ret "anchor"; }
-    if (sel e.alias)        { ret "alias"; }
-    if (sel e.unclosed)     { ret "unclosed"; }
-    if (sel e.end)          { ret "end"; }
-    if (sel e.depth)        { ret "depth"; }
+    if (sel e.alloc)         { ret "alloc"; }
+    if (sel e.syntax)        { ret "syntax"; }
+    if (sel e.tab)           { ret "tab"; }
+    if (sel e.key)           { ret "key"; }
+    if (sel e.unterminated)  { ret "unterminated"; }
+    if (sel e.escape)        { ret "escape"; }
+    if (sel e.character)     { ret "character"; }
+    if (sel e.header)        { ret "header"; }
+    if (sel e.directive)     { ret "directive"; }
+    if (sel e.bad_tag)       { ret "tag"; }
+    if (sel e.handle)        { ret "handle"; }
+    if (sel e.anchor)        { ret "anchor"; }
+    if (sel e.alias)         { ret "alias"; }
+    if (sel e.unclosed)      { ret "unclosed"; }
+    if (sel e.end)           { ret "end"; }
+    if (sel e.duplicate_key) { ret "duplicate_key"; }
+    if (sel e.depth)         { ret "depth"; }
     ret "expansion";
 }
