@@ -10,3 +10,4 @@ fwd yaml.node;
 fwd yaml.scan;
 fwd yaml.parse;
 fwd yaml.schema;
+fwd yaml.write;
