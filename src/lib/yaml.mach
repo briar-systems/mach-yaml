@@ -1,5 +1,9 @@
 # the yaml library, what a dependent's `use yaml;` binds
-# a YAML 1.2 reader and writer.
+#
+# a YAML 1.2 reader and writer
 
 # the startup a test dispatcher of this library links
 use std.runtime;
+
+fwd yaml.error;
+fwd yaml.node;

@@ -1,0 +1,103 @@
+# the defects a read can refuse input with, and the limits that bound a read
+
+use std.allocator;
+use std.types.size.usize;
+use std.types.string.str;
+
+# where in the input something happened
+pub rec Mark {
+    offset: usize;
+    line:   usize;
+    column: usize;
+}
+
+# an allocation the allocator refused, and where the read had got to
+pub rec Refusal {
+    cause: allocator.Error;
+    at:    Mark;
+}
+
+# every way a read can fail
+pub tag Error: u8 {
+    alloc:  Refusal;
+    syntax: Mark;
+    tab:    Mark;
+    # a simple key never closed by its colon, or a value where none is allowed
+    key:          Mark;
+    unterminated: Mark;
+    escape:       Mark;
+    character:    Mark;
+    header:       Mark;
+    directive:    Mark;
+    bad_tag:      Mark;
+    handle:       Mark;
+    anchor:       Mark;
+    # an alias to an anchor that is not defined, or not complete yet
+    alias:    Mark;
+    unclosed: Mark;
+    # content after a document that needs a document marker first
+    end:       Mark;
+    depth:     Mark;
+    expansion: Mark;
+}
+
+# bounds on what a read accepts from untrusted input
+pub rec Limits {
+    # how many collections may nest
+    max_depth: usize;
+    # how many nodes aliases may add to a document when expanded
+    max_expansion: usize;
+}
+
+# the limits a read uses unless the caller says otherwise
+pub fun limits_default() Limits {
+    ret Limits{max_depth: 128, max_expansion: 1_000_000};
+}
+
+# a mark with its line and column at the start of the input
+pub fun mark_start() Mark {
+    ret Mark{offset: 0, line: 1, column: 1};
+}
+
+# where a defect was found
+pub fun error_mark(e: Error) Mark {
+    if (sel e.alloc)        { ret e.alloc.at; }
+    if (sel e.syntax)       { ret e.syntax; }
+    if (sel e.tab)          { ret e.tab; }
+    if (sel e.key)          { ret e.key; }
+    if (sel e.unterminated) { ret e.unterminated; }
+    if (sel e.escape)       { ret e.escape; }
+    if (sel e.character)    { ret e.character; }
+    if (sel e.header)       { ret e.header; }
+    if (sel e.directive)    { ret e.directive; }
+    if (sel e.bad_tag)      { ret e.bad_tag; }
+    if (sel e.handle)       { ret e.handle; }
+    if (sel e.anchor)       { ret e.anchor; }
+    if (sel e.alias)        { ret e.alias; }
+    if (sel e.unclosed)     { ret e.unclosed; }
+    if (sel e.end)          { ret e.end; }
+    if (sel e.depth)        { ret e.depth; }
+    if (sel e.expansion)    { ret e.expansion; }
+    ret mark_start();
+}
+
+# the name of a defect, the case of Error it is
+pub fun error_name(e: Error) str {
+    if (sel e.alloc)        { ret "alloc"; }
+    if (sel e.syntax)       { ret "syntax"; }
+    if (sel e.tab)          { ret "tab"; }
+    if (sel e.key)          { ret "key"; }
+    if (sel e.unterminated) { ret "unterminated"; }
+    if (sel e.escape)       { ret "escape"; }
+    if (sel e.character)    { ret "character"; }
+    if (sel e.header)       { ret "header"; }
+    if (sel e.directive)    { ret "directive"; }
+    if (sel e.bad_tag)      { ret "tag"; }
+    if (sel e.handle)       { ret "handle"; }
+    if (sel e.anchor)       { ret "anchor"; }
+    if (sel e.alias)        { ret "alias"; }
+    if (sel e.unclosed)     { ret "unclosed"; }
+    if (sel e.end)          { ret "end"; }
+    if (sel e.depth)        { ret "depth"; }
+    ret "expansion";
+}
