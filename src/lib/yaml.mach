@@ -8,3 +8,4 @@ use std.runtime;
 fwd yaml.error;
 fwd yaml.node;
 fwd yaml.scan;
+fwd yaml.parse;
