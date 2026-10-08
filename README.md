@@ -13,6 +13,7 @@
 - `yaml.node` is the tree: scalar, sequence, mapping and alias nodes, builders and accessors for them, `node_find`, and `node_equal`.
 - `yaml.schema` reads a plain untagged scalar, or one under a core tag, as null, bool, int, float or string, without converting the tree.
 - `yaml.write` writes a tree back in block style through std's writer, quoting only when the plain form would not read back the same.
+- `yaml.core` classifies plain scalar text under the core schema.
 - `yaml.scan` is the tokenizer under the reader.
 - `yaml.error` holds the defects, each with a 1-based line and column, and the `Limits` that bound nesting depth and alias expansion.
 
