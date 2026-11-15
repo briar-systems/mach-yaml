@@ -59,9 +59,9 @@ pub rec Node {
 
 # a copy of len bytes made on the heap, null-terminated
 pub fun own_copy(alloc: *allocator.Allocator, src: *u8, len: usize) res[*u8, allocator.Error] {
-    val got: res[*u8, allocator.Error] = allocator.allocate[u8](alloc, len + 1);
-    if (sel got.err) { ret got; }
-    val dst: *u8 = got.ok;
+    val res_allocate: res[*u8, allocator.Error] = allocator.allocate[u8](alloc, len + 1);
+    if (sel res_allocate.err) { ret res_allocate; }
+    val dst: *u8 = res_allocate.ok;
     if (len > 0) { raw_copy(dst::ptr, src::ptr, len); }
     dst[len] = 0;
     ret res[*u8, allocator.Error].ok{dst};
@@ -75,9 +75,9 @@ pub fun own_free(alloc: *allocator.Allocator, p: *u8, len: usize) err[allocator.
 
 # allocate a node of a kind, with no text, tag, anchor or children
 pub fun new_node(alloc: *allocator.Allocator, kind: Kind) res[*Node, allocator.Error] {
-    val got: res[*Node, allocator.Error] = allocator.zallocate[Node](alloc, 1);
-    if (sel got.err) { ret got; }
-    val n: *Node = got.ok;
+    val res_zallocate: res[*Node, allocator.Error] = allocator.zallocate[Node](alloc, 1);
+    if (sel res_zallocate.err) { ret res_zallocate; }
+    val n: *Node = res_zallocate.ok;
     n.kind   = kind;
     n.weight = 1;
     ret res[*Node, allocator.Error].ok{n};
@@ -85,43 +85,43 @@ pub fun new_node(alloc: *allocator.Allocator, kind: Kind) res[*Node, allocator.E
 
 # a scalar holding a copy of len bytes of text
 pub fun make_scalar(alloc: *allocator.Allocator, text: *u8, len: usize, style: Style) res[*Node, allocator.Error] {
-    val copy: res[*u8, allocator.Error] = own_copy(alloc, text, len);
-    if (sel copy.err) { ret res[*Node, allocator.Error].err{copy.err}; }
-    val made: res[*Node, allocator.Error] = new_node(alloc, SCALAR);
-    if (sel made.err) {
-        own_free(alloc, copy.ok, len);
-        ret made;
+    val res_copy: res[*u8, allocator.Error] = own_copy(alloc, text, len);
+    if (sel res_copy.err) { ret res[*Node, allocator.Error].err{res_copy.err}; }
+    val res_made: res[*Node, allocator.Error] = new_node(alloc, SCALAR);
+    if (sel res_made.err) {
+        own_free(alloc, res_copy.ok, len);
+        ret res_made;
     }
-    val n: *Node = made.ok;
-    n.text     = copy.ok;
+    val n: *Node = res_made.ok;
+    n.text     = res_copy.ok;
     n.text_len = len;
     n.style    = style;
-    ret made;
+    ret res_made;
 }
 
 # an empty sequence
 pub fun make_sequence(alloc: *allocator.Allocator) res[*Node, allocator.Error] {
-    val made: res[*Node, allocator.Error] = new_node(alloc, SEQUENCE);
-    if (sel made.err) { ret made; }
-    made.ok.style = BLOCK;
-    ret made;
+    val res_made: res[*Node, allocator.Error] = new_node(alloc, SEQUENCE);
+    if (sel res_made.err) { ret res_made; }
+    res_made.ok.style = BLOCK;
+    ret res_made;
 }
 
 # an empty mapping
 pub fun make_mapping(alloc: *allocator.Allocator) res[*Node, allocator.Error] {
-    val made: res[*Node, allocator.Error] = new_node(alloc, MAPPING);
-    if (sel made.err) { ret made; }
-    made.ok.style = BLOCK;
-    ret made;
+    val res_made: res[*Node, allocator.Error] = new_node(alloc, MAPPING);
+    if (sel res_made.err) { ret res_made; }
+    res_made.ok.style = BLOCK;
+    ret res_made;
 }
 
 # an alias of a node, which must carry an anchor for the writer to name
 pub fun make_alias(alloc: *allocator.Allocator, target: *Node) res[*Node, allocator.Error] {
-    val made: res[*Node, allocator.Error] = new_node(alloc, ALIAS);
-    if (sel made.err) { ret made; }
-    made.ok.target = target;
-    made.ok.weight = target.weight;
-    ret made;
+    val res_made: res[*Node, allocator.Error] = new_node(alloc, ALIAS);
+    if (sel res_made.err) { ret res_made; }
+    res_made.ok.target = target;
+    res_made.ok.weight = target.weight;
+    ret res_made;
 }
 
 fun add_weight(a: usize, b: usize) usize {
@@ -140,18 +140,18 @@ fun grow(alloc: *allocator.Allocator, n: *Node) res[usize, allocator.Error] {
     var next: usize = n.cap * 2;
     if (next == 0) { next = 4; }
 
-    val width: usize                        = stride(n);
-    val items: res[**Node, allocator.Error] = allocator.reallocate[*Node](alloc, n.items, n.cap * width, next * width);
-    if (sel items.err) { ret res[usize, allocator.Error].err{items.err}; }
-    n.items = items.ok;
+    val width:     usize                        = stride(n);
+    val res_items: res[**Node, allocator.Error] = allocator.reallocate[*Node](alloc, n.items, n.cap * width, next * width);
+    if (sel res_items.err) { ret res[usize, allocator.Error].err{res_items.err}; }
+    n.items = res_items.ok;
     n.cap   = next;
     ret res[usize, allocator.Error].ok{next};
 }
 
 # append an item to a sequence, taking ownership of it
 pub fun push_item(alloc: *allocator.Allocator, seq: *Node, item: *Node) err[allocator.Error] {
-    val room: res[usize, allocator.Error] = grow(alloc, seq);
-    if (sel room.err) { ret err[allocator.Error].err{room.err}; }
+    val res_room: res[usize, allocator.Error] = grow(alloc, seq);
+    if (sel res_room.err) { ret err[allocator.Error].err{res_room.err}; }
     seq.items[seq.count] = item;
     seq.count            = seq.count + 1;
     seq.weight           = add_weight(seq.weight, item.weight);
@@ -160,8 +160,8 @@ pub fun push_item(alloc: *allocator.Allocator, seq: *Node, item: *Node) err[allo
 
 # append a key and value pair to a mapping, taking ownership of both
 pub fun push_pair(alloc: *allocator.Allocator, map: *Node, key: *Node, value: *Node) err[allocator.Error] {
-    val room: res[usize, allocator.Error] = grow(alloc, map);
-    if (sel room.err) { ret err[allocator.Error].err{room.err}; }
+    val res_room: res[usize, allocator.Error] = grow(alloc, map);
+    if (sel res_room.err) { ret err[allocator.Error].err{res_room.err}; }
     map.items[map.count * 2]     = key;
     map.items[map.count * 2 + 1] = value;
     map.count                    = map.count + 1;
@@ -171,22 +171,22 @@ pub fun push_pair(alloc: *allocator.Allocator, map: *Node, key: *Node, value: *N
 
 # give a node a tag, replacing any it had
 pub fun set_tag(alloc: *allocator.Allocator, n: *Node, tag: str) err[allocator.Error] {
-    val len:  usize                     = str_len(tag);
-    val copy: res[*u8, allocator.Error] = own_copy(alloc, tag, len);
-    if (sel copy.err) { ret err[allocator.Error].err{copy.err}; }
+    val len:      usize                     = str_len(tag);
+    val res_copy: res[*u8, allocator.Error] = own_copy(alloc, tag, len);
+    if (sel res_copy.err) { ret err[allocator.Error].err{res_copy.err}; }
     own_free(alloc, n.tag_text, n.tag_len);
-    n.tag_text = copy.ok;
+    n.tag_text = res_copy.ok;
     n.tag_len  = len;
     ret err[allocator.Error].ok{};
 }
 
 # give a node an anchor name, replacing any it had
 pub fun set_anchor(alloc: *allocator.Allocator, n: *Node, name: str) err[allocator.Error] {
-    val len:  usize                     = str_len(name);
-    val copy: res[*u8, allocator.Error] = own_copy(alloc, name, len);
-    if (sel copy.err) { ret err[allocator.Error].err{copy.err}; }
+    val len:      usize                     = str_len(name);
+    val res_copy: res[*u8, allocator.Error] = own_copy(alloc, name, len);
+    if (sel res_copy.err) { ret err[allocator.Error].err{res_copy.err}; }
     own_free(alloc, n.anchor, n.anchor_len);
-    n.anchor     = copy.ok;
+    n.anchor     = res_copy.ok;
     n.anchor_len = len;
     ret err[allocator.Error].ok{};
 }
@@ -200,11 +200,11 @@ pub fun dnit(alloc: *allocator.Allocator, n: *Node) err[allocator.Error] {
     val width: usize = stride(n);
     var i:     usize = 0;
     for (i < n.count * width) {
-        val c: err[allocator.Error] = dnit(alloc, n.items[i]);
-        if (sel c.err) {
+        val err_dnit: err[allocator.Error] = dnit(alloc, n.items[i]);
+        if (sel err_dnit.err) {
             if (!failed) {
                 failed = true;
-                cause  = c.err;
+                cause  = err_dnit.err;
             }
         }
         i = i + 1;
@@ -227,11 +227,11 @@ pub fun dnit(alloc: *allocator.Allocator, n: *Node) err[allocator.Error] {
         i = i + 1;
     }
 
-    val self: err[allocator.Error] = allocator.deallocate[Node](alloc, n, 1);
-    if (sel self.err) {
+    val err_self: err[allocator.Error] = allocator.deallocate[Node](alloc, n, 1);
+    if (sel err_self.err) {
         if (!failed) {
             failed = true;
-            cause  = self.err;
+            cause  = err_self.err;
         }
     }
     if (failed) { ret err[allocator.Error].err{cause}; }

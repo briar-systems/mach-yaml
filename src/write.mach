@@ -79,8 +79,8 @@ fun fault(e: *Emit, cause: EmitError) {
 
 fun put_bytes(e: *Emit, p: *u8, n: usize) {
     if (e.failed || n == 0) { ret; }
-    val r: err[WriteError] = writer.write_all(e.w, p, n);
-    if (sel r.err) { fault(e, EmitError.sink{r.err}); }
+    val err_write_all: err[WriteError] = writer.write_all(e.w, p, n);
+    if (sel err_write_all.err) { fault(e, EmitError.sink{err_write_all.err}); }
 }
 
 fun put(e: *Emit, s: str) {
@@ -526,18 +526,18 @@ $if (capability.HOSTED) {
         var a:   allocator.Allocator;
         page.make(?a);
 
-        val first: res[Stream, error.Error] = parse.parse(src, str_len(src), ?a);
-        if (sel first.err) { ret 1; }
-        var one: Stream = first.ok;
+        val res_first: res[Stream, error.Error] = parse.parse(src, str_len(src), ?a);
+        if (sel res_first.err) { ret 1; }
+        var one: Stream = res_first.ok;
 
-        var out1:  Sink;
-        var w1:    writer.Writer  = sink_writer(?out1);
-        val wrote: err[EmitError] = write_stream(?w1, ?one);
-        if (sel wrote.err) { ret 2; }
+        var out1:      Sink;
+        var w1:        writer.Writer  = sink_writer(?out1);
+        val err_wrote: err[EmitError] = write_stream(?w1, ?one);
+        if (sel err_wrote.err) { ret 2; }
 
-        val second: res[Stream, error.Error] = parse.parse(?out1.data[0], out1.len, ?a);
-        if (sel second.err) { ret 3; }
-        var two: Stream = second.ok;
+        val res_second: res[Stream, error.Error] = parse.parse(?out1.data[0], out1.len, ?a);
+        if (sel res_second.err) { ret 3; }
+        var two: Stream = res_second.ok;
         if (parse.stream_count(?one) != parse.stream_count(?two)) { ret 4; }
         var i: usize = 0;
         for (i < parse.stream_count(?one)) {

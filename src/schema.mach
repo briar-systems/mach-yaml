@@ -113,27 +113,27 @@ pub fun node_float(n: *Node) opt[f64] {
     val r: *Node = node.node_resolve(n);
 
     if (kind == INT) {
-        val i: opt[i64] = node_int(r);
-        if (!sel i.some) { ret opt[f64].none{}; }
-        ret opt[f64].some{i.some::f64};
+        val opt_node_int: opt[i64] = node_int(r);
+        if (!sel opt_node_int.some) { ret opt[f64].none{}; }
+        ret opt[f64].some{opt_node_int.some::f64};
     }
 
     val special: i32 = core.special_float(r.text, r.text_len);
     if (special == 1) {
         var inf: str = "inf";
         if (r.text[0] == '-') { inf = "-inf"; }
-        val v: res[f64, parse.ParseError] = parse.parse_f64(inf);
-        if (sel v.ok) { ret opt[f64].some{v.ok}; }
+        val res_parse_f64: res[f64, parse.ParseError] = parse.parse_f64(inf);
+        if (sel res_parse_f64.ok) { ret opt[f64].some{res_parse_f64.ok}; }
         ret opt[f64].none{};
     }
     if (special == 2) {
-        val v: res[f64, parse.ParseError] = parse.parse_f64("nan");
-        if (sel v.ok) { ret opt[f64].some{v.ok}; }
+        val res_parse_f64: res[f64, parse.ParseError] = parse.parse_f64("nan");
+        if (sel res_parse_f64.ok) { ret opt[f64].some{res_parse_f64.ok}; }
         ret opt[f64].none{};
     }
     if (!core.float_text(r.text, r.text_len)) { ret opt[f64].none{}; }
-    val v: res[f64, parse.ParseError] = parse.parse_f64_len(r.text, r.text_len);
-    if (sel v.ok) { ret opt[f64].some{v.ok}; }
+    val res_parse_f64_len: res[f64, parse.ParseError] = parse.parse_f64_len(r.text, r.text_len);
+    if (sel res_parse_f64_len.ok) { ret opt[f64].some{res_parse_f64_len.ok}; }
     ret opt[f64].none{};
 }
 
@@ -223,36 +223,36 @@ $if (capability.HOSTED) {
 
         var i: usize = 0;
         for (i < 52) {
-            val made: res[*Node, allocator.Error] = node.make_scalar(?a, rows[i].text, str_len(rows[i].text), rows[i].style);
-            if (sel made.err) { ret 1; }
-            val n: *Node = made.ok;
+            val res_made: res[*Node, allocator.Error] = node.make_scalar(?a, rows[i].text, str_len(rows[i].text), rows[i].style);
+            if (sel res_made.err) { ret 1; }
+            val n: *Node = res_made.ok;
             if (str_len(rows[i].tag) > 0) { node.set_tag(?a, n, rows[i].tag); }
             val code: i32 = (100 + i)::i32;
             if (core_kind(n) != rows[i].kind) { ret code; }
 
             if (rows[i].kind == NULL && !node_is_null(n)) { ret code; }
             if (rows[i].kind == BOOL) {
-                val b: opt[bool] = node_bool(n);
-                if (!sel b.some)                   { ret code; }
-                if ((b.some::i64) != rows[i].ival) { ret code; }
+                val opt_node_bool: opt[bool] = node_bool(n);
+                if (!sel opt_node_bool.some)                   { ret code; }
+                if ((opt_node_bool.some::i64) != rows[i].ival) { ret code; }
             }
             if (rows[i].kind == INT) {
-                val v: opt[i64] = node_int(n);
+                val opt_node_int: opt[i64] = node_int(n);
                 if (rows[i].special == 4) {
-                    if (sel v.some) { ret code; }
+                    if (sel opt_node_int.some) { ret code; }
                 }
                 or {
-                    if (!sel v.some)            { ret code; }
-                    if (v.some != rows[i].ival) { ret code; }
+                    if (!sel opt_node_int.some)            { ret code; }
+                    if (opt_node_int.some != rows[i].ival) { ret code; }
                 }
             }
             if (rows[i].kind == FLOAT) {
-                val f: opt[f64] = node_float(n);
-                if (!sel f.some)                                    { ret code; }
-                if (rows[i].special == 0 && f.some != rows[i].fval) { ret code; }
-                if (rows[i].special == 1 && !(f.some > 1.0e308))    { ret code; }
-                if (rows[i].special == 2 && !(f.some < -1.0e308))   { ret code; }
-                if (rows[i].special == 3 && f.some == f.some)       { ret code; }
+                val opt_node_float: opt[f64] = node_float(n);
+                if (!sel opt_node_float.some)                                           { ret code; }
+                if (rows[i].special == 0 && opt_node_float.some != rows[i].fval)        { ret code; }
+                if (rows[i].special == 1 && !(opt_node_float.some > 1.0e308))           { ret code; }
+                if (rows[i].special == 2 && !(opt_node_float.some < -1.0e308))          { ret code; }
+                if (rows[i].special == 3 && opt_node_float.some == opt_node_float.some) { ret code; }
             }
             node.dnit(?a, n);
             i = i + 1;

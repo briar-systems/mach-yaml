@@ -114,9 +114,9 @@ pub fun init(s: *Scanner, src: *u8, len: usize, alloc: *allocator.Allocator, lim
     s.bad     = false;
     s.cont    = 0;
 
-    var base:   SimpleKey;
-    val pushed: res[usize, allocator.Error] = vec.push[SimpleKey](?s.keys, base);
-    if (sel pushed.err) { ret err[allocator.Error].err{pushed.err}; }
+    var base:       SimpleKey;
+    val res_pushed: res[usize, allocator.Error] = vec.push[SimpleKey](?s.keys, base);
+    if (sel res_pushed.err) { ret err[allocator.Error].err{res_pushed.err}; }
     ret err[allocator.Error].ok{};
 }
 
@@ -127,34 +127,34 @@ pub fun dnit(s: *Scanner) err[allocator.Error] {
 
     var i: usize = 0;
     for (i < s.queue.len) {
-        val freed: err[allocator.Error] = token_free(s.alloc, ?s.queue.data[i]);
-        if (sel freed.err) {
+        val err_freed: err[allocator.Error] = token_free(s.alloc, ?s.queue.data[i]);
+        if (sel err_freed.err) {
             if (!failed) {
                 failed = true;
-                cause  = freed.err;
+                cause  = err_freed.err;
             }
         }
         i = i + 1;
     }
-    val q: err[allocator.Error] = vec.dnit[Token](?s.queue);
-    if (sel q.err) {
+    val err_dnit: err[allocator.Error] = vec.dnit[Token](?s.queue);
+    if (sel err_dnit.err) {
         if (!failed) {
             failed = true;
-            cause  = q.err;
+            cause  = err_dnit.err;
         }
     }
-    val n: err[allocator.Error] = vec.dnit[i64](?s.indents);
-    if (sel n.err) {
+    val err_dnit_indents: err[allocator.Error] = vec.dnit[i64](?s.indents);
+    if (sel err_dnit_indents.err) {
         if (!failed) {
             failed = true;
-            cause  = n.err;
+            cause  = err_dnit_indents.err;
         }
     }
-    val k: err[allocator.Error] = vec.dnit[SimpleKey](?s.keys);
-    if (sel k.err) {
+    val err_dnit_keys: err[allocator.Error] = vec.dnit[SimpleKey](?s.keys);
+    if (sel err_dnit_keys.err) {
         if (!failed) {
             failed = true;
-            cause  = k.err;
+            cause  = err_dnit_keys.err;
         }
     }
     if (failed) { ret err[allocator.Error].err{cause}; }
@@ -163,14 +163,14 @@ pub fun dnit(s: *Scanner) err[allocator.Error] {
 
 # release the strings a token still owns
 pub fun token_free(alloc: *allocator.Allocator, t: *Token) err[allocator.Error] {
-    val a: err[allocator.Error] = node.own_free(alloc, t.text, t.text_len);
-    val b: err[allocator.Error] = node.own_free(alloc, t.text2, t.text2_len);
+    val err_own_free:       err[allocator.Error] = node.own_free(alloc, t.text, t.text_len);
+    val err_own_free_alloc: err[allocator.Error] = node.own_free(alloc, t.text2, t.text2_len);
     t.text      = nil;
     t.text_len  = 0;
     t.text2     = nil;
     t.text2_len = 0;
-    if (sel a.err) { ret a; }
-    ret b;
+    if (sel err_own_free.err) { ret err_own_free; }
+    ret err_own_free_alloc;
 }
 
 fun here(s: *Scanner) Mark {
@@ -292,9 +292,9 @@ fun buf_put(s: *Scanner, b: *Buf, c: u8) err[Error] {
     if (b.len + 1 >= b.cap) {
         var next: usize = b.cap * 2;
         if (next == 0) { next = 32; }
-        val grown: res[*u8, allocator.Error] = allocator.reallocate[u8](s.alloc, b.data, b.cap, next);
-        if (sel grown.err) { ret fail(refused(s, grown.err)); }
-        b.data = grown.ok;
+        val res_grown: res[*u8, allocator.Error] = allocator.reallocate[u8](s.alloc, b.data, b.cap, next);
+        if (sel res_grown.err) { ret fail(refused(s, res_grown.err)); }
+        b.data = res_grown.ok;
         b.cap  = next;
     }
     b.data[b.len] = c;
@@ -305,8 +305,8 @@ fun buf_put(s: *Scanner, b: *Buf, c: u8) err[Error] {
 fun buf_repeat(s: *Scanner, b: *Buf, c: u8, n: usize) err[Error] {
     var i: usize = 0;
     for (i < n) {
-        val put: err[Error] = buf_put(s, b, c);
-        if (sel put.err) { ret put; }
+        val err_put: err[Error] = buf_put(s, b, c);
+        if (sel err_put.err) { ret err_put; }
         i = i + 1;
     }
     ret pass();
@@ -317,8 +317,8 @@ fun buf_put_cp(s: *Scanner, b: *Buf, cp: utf8.Codepoint) err[Error] {
     val n:   usize = utf8.encode(cp, ?enc[0], 4);
     var i:   usize = 0;
     for (i < n) {
-        val put: err[Error] = buf_put(s, b, enc[i]);
-        if (sel put.err) { ret put; }
+        val err_put: err[Error] = buf_put(s, b, enc[i]);
+        if (sel err_put.err) { ret err_put; }
         i = i + 1;
     }
     ret pass();
@@ -328,8 +328,8 @@ fun buf_put_cp(s: *Scanner, b: *Buf, cp: utf8.Codepoint) err[Error] {
 fun buf_put_src(s: *Scanner, b: *Buf, start: usize, len: usize) err[Error] {
     var i: usize = 0;
     for (i < len) {
-        val put: err[Error] = buf_put(s, b, s.src[start + i]);
-        if (sel put.err) { ret put; }
+        val err_put: err[Error] = buf_put(s, b, s.src[start + i]);
+        if (sel err_put.err) { ret err_put; }
         i = i + 1;
     }
     ret pass();
@@ -346,17 +346,17 @@ fun buf_free(s: *Scanner, b: *Buf) {
 fun buf_finish(s: *Scanner, b: *Buf) res[*u8, Error] {
     var out: *u8;
     if (b.cap == 0) {
-        val got: res[*u8, allocator.Error] = allocator.allocate[u8](s.alloc, 1);
-        if (sel got.err) { ret res[*u8, Error].err{refused(s, got.err)}; }
-        out = got.ok;
+        val res_allocate: res[*u8, allocator.Error] = allocator.allocate[u8](s.alloc, 1);
+        if (sel res_allocate.err) { ret res[*u8, Error].err{refused(s, res_allocate.err)}; }
+        out = res_allocate.ok;
     }
     or {
-        val got: res[*u8, allocator.Error] = allocator.reallocate[u8](s.alloc, b.data, b.cap, b.len + 1);
-        if (sel got.err) {
+        val res_reallocate: res[*u8, allocator.Error] = allocator.reallocate[u8](s.alloc, b.data, b.cap, b.len + 1);
+        if (sel res_reallocate.err) {
             buf_free(s, b);
-            ret res[*u8, Error].err{refused(s, got.err)};
+            ret res[*u8, Error].err{refused(s, res_reallocate.err)};
         }
-        out = got.ok;
+        out = res_reallocate.ok;
     }
     out[b.len] = 0;
     b.data     = nil;
@@ -372,15 +372,15 @@ fun token_at(kind: TokenKind, mark: Mark) Token {
 }
 
 fun emit(s: *Scanner, t: Token) err[Error] {
-    val pushed: res[usize, allocator.Error] = vec.push[Token](?s.queue, t);
-    if (sel pushed.err) { ret fail(refused(s, pushed.err)); }
+    val res_pushed: res[usize, allocator.Error] = vec.push[Token](?s.queue, t);
+    if (sel res_pushed.err) { ret fail(refused(s, res_pushed.err)); }
     ret pass();
 }
 
 # put a token at a queue index, shifting the tokens from there on
 fun emit_at(s: *Scanner, at: usize, t: Token) err[Error] {
-    val pushed: err[Error] = emit(s, t);
-    if (sel pushed.err) { ret pushed; }
+    val err_pushed: err[Error] = emit(s, t);
+    if (sel err_pushed.err) { ret err_pushed; }
     var i: usize = s.queue.len - 1;
     for (i > at) {
         s.queue.data[i] = s.queue.data[i - 1];
@@ -416,8 +416,8 @@ fun save_simple_key(s: *Scanner) err[Error] {
     key.col      = s.col;
     key.mark     = here(s);
 
-    val removed: err[Error] = remove_simple_key(s);
-    if (sel removed.err) { ret removed; }
+    val err_removed: err[Error] = remove_simple_key(s);
+    if (sel err_removed.err) { ret err_removed; }
     s.keys.data[s.keys.len - 1] = key;
     ret pass();
 }
@@ -439,10 +439,10 @@ fun roll_indent(s: *Scanner, col: usize, at: usize, kind: TokenKind, mark: Mark,
     if (s.flow > 0)           { ret pass(); }
     if (s.indent >= col::i64) { ret pass(); }
 
-    val deep: err[Error] = check_depth(s, 1);
-    if (sel deep.err) { ret deep; }
-    val pushed: res[usize, allocator.Error] = vec.push[i64](?s.indents, s.indent);
-    if (sel pushed.err) { ret fail(refused(s, pushed.err)); }
+    val err_deep: err[Error] = check_depth(s, 1);
+    if (sel err_deep.err) { ret err_deep; }
+    val res_pushed: res[usize, allocator.Error] = vec.push[i64](?s.indents, s.indent);
+    if (sel res_pushed.err) { ret fail(refused(s, res_pushed.err)); }
     s.indent = col::i64;
 
     if (append) { ret emit(s, token_at(kind, mark)); }
@@ -452,11 +452,11 @@ fun roll_indent(s: *Scanner, col: usize, at: usize, kind: TokenKind, mark: Mark,
 fun unroll_indent(s: *Scanner, col: i64) err[Error] {
     if (s.flow > 0) { ret pass(); }
     for (s.indent > col) {
-        val ended: err[Error] = emit(s, token_at(TOK_BLOCK_END, here(s)));
-        if (sel ended.err) { ret ended; }
-        val prev: opt[i64] = vec.pop[i64](?s.indents);
+        val err_ended: err[Error] = emit(s, token_at(TOK_BLOCK_END, here(s)));
+        if (sel err_ended.err) { ret err_ended; }
+        val opt_prev: opt[i64] = vec.pop[i64](?s.indents);
         s.indent = -1;
-        if (sel prev.some) { s.indent = prev.some; }
+        if (sel opt_prev.some) { s.indent = opt_prev.some; }
     }
     ret pass();
 }
@@ -489,17 +489,17 @@ fun scan_to_next_token(s: *Scanner) {
 }
 
 fun emit_text(s: *Scanner, kind: TokenKind, style: Style, mark: Mark, b: *Buf) err[Error] {
-    val len: usize           = b.len;
-    val got: res[*u8, Error] = buf_finish(s, b);
-    if (sel got.err) { ret fail(got.err); }
+    val len:            usize           = b.len;
+    val res_buf_finish: res[*u8, Error] = buf_finish(s, b);
+    if (sel res_buf_finish.err) { ret fail(res_buf_finish.err); }
     var t: Token = token_at(kind, mark);
     t.style    = style;
-    t.text     = got.ok;
+    t.text     = res_buf_finish.ok;
     t.text_len = len;
-    val pushed: err[Error] = emit(s, t);
-    if (sel pushed.err) {
+    val err_pushed: err[Error] = emit(s, t);
+    if (sel err_pushed.err) {
         node.own_free(s.alloc, t.text, len);
-        ret pushed;
+        ret err_pushed;
     }
     ret pass();
 }
@@ -528,12 +528,12 @@ fun plain_into(s: *Scanner, b: *Buf, crossed: *bool) err[Error] {
             if (s.flow > 0 && is_flow_indicator(c))                                                   { brk; }
             if (!printable(c))                                                                        { ret fail(Error.character{here(s)}); }
             if (gap) {
-                val joined: err[Error] = gap_into(s, b, breaks, ws_start, ws_len);
-                if (sel joined.err) { ret joined; }
+                val err_joined: err[Error] = gap_into(s, b, breaks, ws_start, ws_len);
+                if (sel err_joined.err) { ret err_joined; }
                 gap = false;
             }
-            val put: err[Error] = buf_put(s, b, c);
-            if (sel put.err) { ret put; }
+            val err_put: err[Error] = buf_put(s, b, c);
+            if (sel err_put.err) { ret err_put; }
             skip(s);
             progressed = true;
             @crossed   = false;
@@ -562,17 +562,17 @@ fun plain_into(s: *Scanner, b: *Buf, crossed: *bool) err[Error] {
 }
 
 fun fetch_plain(s: *Scanner) err[Error] {
-    val saved: err[Error] = save_simple_key(s);
-    if (sel saved.err) { ret saved; }
+    val err_saved: err[Error] = save_simple_key(s);
+    if (sel err_saved.err) { ret err_saved; }
     s.allowed = false;
 
-    val mark:    Mark       = here(s);
-    var b:       Buf;
-    var crossed: bool       = false;
-    val r:       err[Error] = plain_into(s, ?b, ?crossed);
-    if (sel r.err) {
+    val mark:           Mark       = here(s);
+    var b:              Buf;
+    var crossed:        bool       = false;
+    val err_plain_into: err[Error] = plain_into(s, ?b, ?crossed);
+    if (sel err_plain_into.err) {
         buf_free(s, ?b);
-        ret r;
+        ret err_plain_into;
     }
     if (crossed) { s.allowed = true; }
     ret emit_text(s, TOK_SCALAR, node.PLAIN, mark, ?b);
@@ -634,8 +634,8 @@ fun quoted_into(s: *Scanner, b: *Buf, single: bool, start: Mark) err[Error] {
         for (!is_blankz_at(s, 0)) {
             val c: u8 = peek_at(s, 0);
             if (single && c == '\'' && peek_at(s, 1) == '\'') {
-                val put: err[Error] = buf_put(s, b, '\'');
-                if (sel put.err) { ret put; }
+                val err_put: err[Error] = buf_put(s, b, '\'');
+                if (sel err_put.err) { ret err_put; }
                 skip_n(s, 2);
                 cnt;
             }
@@ -646,13 +646,13 @@ fun quoted_into(s: *Scanner, b: *Buf, single: bool, start: Mark) err[Error] {
                     escaped = true;
                     brk;
                 }
-                val esc: err[Error] = escape_into(s, b);
-                if (sel esc.err) { ret esc; }
+                val err_esc: err[Error] = escape_into(s, b);
+                if (sel err_esc.err) { ret err_esc; }
                 cnt;
             }
             if (!printable(c)) { ret fail(Error.character{here(s)}); }
-            val put: err[Error] = buf_put(s, b, c);
-            if (sel put.err) { ret put; }
+            val err_put: err[Error] = buf_put(s, b, c);
+            if (sel err_put.err) { ret err_put; }
             skip(s);
         }
         if (!escaped && peek_at(s, 0) == quote && !at_end(s, 0)) { brk; }
@@ -671,12 +671,12 @@ fun quoted_into(s: *Scanner, b: *Buf, single: bool, start: Mark) err[Error] {
             }
         }
         if (escaped) {
-            val joined: err[Error] = buf_repeat(s, b, '\n', breaks);
-            if (sel joined.err) { ret joined; }
+            val err_joined: err[Error] = buf_repeat(s, b, '\n', breaks);
+            if (sel err_joined.err) { ret err_joined; }
         }
         or {
-            val joined: err[Error] = gap_into(s, b, breaks, ws_start, ws_len);
-            if (sel joined.err) { ret joined; }
+            val err_joined: err[Error] = gap_into(s, b, breaks, ws_start, ws_len);
+            if (sel err_joined.err) { ret err_joined; }
         }
     }
     skip(s);
@@ -684,16 +684,16 @@ fun quoted_into(s: *Scanner, b: *Buf, single: bool, start: Mark) err[Error] {
 }
 
 fun fetch_quoted(s: *Scanner, single: bool) err[Error] {
-    val saved: err[Error] = save_simple_key(s);
-    if (sel saved.err) { ret saved; }
+    val err_saved: err[Error] = save_simple_key(s);
+    if (sel err_saved.err) { ret err_saved; }
     s.allowed = false;
 
-    val mark: Mark       = here(s);
-    var b:    Buf;
-    val r:    err[Error] = quoted_into(s, ?b, single, mark);
-    if (sel r.err) {
+    val mark:            Mark       = here(s);
+    var b:               Buf;
+    val err_quoted_into: err[Error] = quoted_into(s, ?b, single, mark);
+    if (sel err_quoted_into.err) {
         buf_free(s, ?b);
-        ret r;
+        ret err_quoted_into;
     }
     var style: Style = node.DOUBLE;
     if (single) { style = node.SINGLE; }
@@ -770,8 +770,8 @@ fun block_into(s: *Scanner, b: *Buf, literal: bool) err[Error] {
         indent   = inc;
         if (s.indent >= 0) { indent = s.indent + inc; }
     }
-    val first: err[Error] = block_breaks(s, ?indent, ?detected, ?trailing);
-    if (sel first.err) { ret first; }
+    val err_first: err[Error] = block_breaks(s, ?indent, ?detected, ?trailing);
+    if (sel err_first.err) { ret err_first; }
 
     var leading:       bool = false;
     var leading_blank: bool = false;
@@ -779,54 +779,54 @@ fun block_into(s: *Scanner, b: *Buf, literal: bool) err[Error] {
         val trailing_blank: bool = is_blank_at(s, 0);
         if (!literal && leading && !leading_blank && !trailing_blank) {
             if (trailing == 0) {
-                val put: err[Error] = buf_put(s, b, ' ');
-                if (sel put.err) { ret put; }
+                val err_put: err[Error] = buf_put(s, b, ' ');
+                if (sel err_put.err) { ret err_put; }
             }
         }
         or (leading) {
-            val put: err[Error] = buf_put(s, b, '\n');
-            if (sel put.err) { ret put; }
+            val err_put: err[Error] = buf_put(s, b, '\n');
+            if (sel err_put.err) { ret err_put; }
         }
         leading = false;
-        val lines: err[Error] = buf_repeat(s, b, '\n', trailing);
-        if (sel lines.err) { ret lines; }
+        val err_lines: err[Error] = buf_repeat(s, b, '\n', trailing);
+        if (sel err_lines.err) { ret err_lines; }
         trailing      = 0;
         leading_blank = trailing_blank;
 
         for (!is_breakz_at(s, 0)) {
             val ch: u8 = peek_at(s, 0);
             if (!printable(ch)) { ret fail(Error.character{here(s)}); }
-            val put: err[Error] = buf_put(s, b, ch);
-            if (sel put.err) { ret put; }
+            val err_put: err[Error] = buf_put(s, b, ch);
+            if (sel err_put.err) { ret err_put; }
             skip(s);
         }
         if (is_break_at(s, 0)) {
             skip(s);
             leading = true;
         }
-        val more: err[Error] = block_breaks(s, ?indent, ?detected, ?trailing);
-        if (sel more.err) { ret more; }
+        val err_more: err[Error] = block_breaks(s, ?indent, ?detected, ?trailing);
+        if (sel err_more.err) { ret err_more; }
     }
 
     if (chomp != -1 && leading) {
-        val put: err[Error] = buf_put(s, b, '\n');
-        if (sel put.err) { ret put; }
+        val err_put: err[Error] = buf_put(s, b, '\n');
+        if (sel err_put.err) { ret err_put; }
     }
     if (chomp == 1) { ret buf_repeat(s, b, '\n', trailing); }
     ret pass();
 }
 
 fun fetch_block_scalar(s: *Scanner, literal: bool) err[Error] {
-    val removed: err[Error] = remove_simple_key(s);
-    if (sel removed.err) { ret removed; }
+    val err_removed: err[Error] = remove_simple_key(s);
+    if (sel err_removed.err) { ret err_removed; }
     s.allowed = true;
 
-    val mark: Mark       = here(s);
-    var b:    Buf;
-    val r:    err[Error] = block_into(s, ?b, literal);
-    if (sel r.err) {
+    val mark:           Mark       = here(s);
+    var b:              Buf;
+    val err_block_into: err[Error] = block_into(s, ?b, literal);
+    if (sel err_block_into.err) {
         buf_free(s, ?b);
-        ret r;
+        ret err_block_into;
     }
     var style: Style = node.FOLDED;
     if (literal) { style = node.LITERAL; }
@@ -839,8 +839,8 @@ fun is_name_stop(s: *Scanner) bool {
 }
 
 fun fetch_anchor(s: *Scanner, kind: TokenKind) err[Error] {
-    val saved: err[Error] = save_simple_key(s);
-    if (sel saved.err) { ret saved; }
+    val err_saved: err[Error] = save_simple_key(s);
+    if (sel err_saved.err) { ret err_saved; }
     s.allowed = false;
 
     val mark: Mark = here(s);
@@ -852,10 +852,10 @@ fun fetch_anchor(s: *Scanner, kind: TokenKind) err[Error] {
             buf_free(s, ?b);
             ret fail(Error.character{here(s)});
         }
-        val put: err[Error] = buf_put(s, ?b, c);
-        if (sel put.err) {
+        val err_put: err[Error] = buf_put(s, ?b, c);
+        if (sel err_put.err) {
             buf_free(s, ?b);
-            ret put;
+            ret err_put;
         }
         skip(s);
     }
@@ -879,14 +879,14 @@ fun uri_into(s: *Scanner, b: *Buf, verbatim: bool, mark: Mark) err[Error] {
             val hi: i64 = hex_value(peek_at(s, 1));
             val lo: i64 = hex_value(peek_at(s, 2));
             if (hi < 0 || lo < 0 || at_end(s, 2)) { ret fail(Error.bad_tag{mark}); }
-            val put: err[Error] = buf_put(s, b, ((hi << 4) | lo)::u8);
-            if (sel put.err) { ret put; }
+            val err_put: err[Error] = buf_put(s, b, ((hi << 4) | lo)::u8);
+            if (sel err_put.err) { ret err_put; }
             skip_n(s, 3);
             cnt;
         }
         if (!is_uri_byte(c, verbatim)) { brk; }
-        val put: err[Error] = buf_put(s, b, c);
-        if (sel put.err) { ret put; }
+        val err_put: err[Error] = buf_put(s, b, c);
+        if (sel err_put.err) { ret err_put; }
         skip(s);
     }
     ret pass();
@@ -896,8 +896,8 @@ fun tag_into(s: *Scanner, handle: *Buf, suffix: *Buf, mark: Mark) err[Error] {
     skip(s);
     if (peek_at(s, 0) == '<') {
         skip(s);
-        val body: err[Error] = uri_into(s, suffix, true, mark);
-        if (sel body.err)                                            { ret body; }
+        val err_body: err[Error] = uri_into(s, suffix, true, mark);
+        if (sel err_body.err)                                        { ret err_body; }
         if (peek_at(s, 0) != '>' || at_end(s, 0) || suffix.len == 0) { ret fail(Error.bad_tag{mark}); }
         skip(s);
         ret pass();
@@ -907,38 +907,38 @@ fun tag_into(s: *Scanner, handle: *Buf, suffix: *Buf, mark: Mark) err[Error] {
     for (is_alnum(peek_at(s, n)) || peek_at(s, n) == '-') {
         n = n + 1;
     }
-    val put: err[Error] = buf_put(s, handle, '!');
-    if (sel put.err) { ret put; }
+    val err_put: err[Error] = buf_put(s, handle, '!');
+    if (sel err_put.err) { ret err_put; }
     if (peek_at(s, n) == '!' && !at_end(s, n)) {
         var i: usize = 0;
         for (i < n) {
-            val w: err[Error] = buf_put(s, handle, peek_at(s, i));
-            if (sel w.err) { ret w; }
+            val err_buf_put: err[Error] = buf_put(s, handle, peek_at(s, i));
+            if (sel err_buf_put.err) { ret err_buf_put; }
             i = i + 1;
         }
-        val close: err[Error] = buf_put(s, handle, '!');
-        if (sel close.err) { ret close; }
+        val err_close: err[Error] = buf_put(s, handle, '!');
+        if (sel err_close.err) { ret err_close; }
         skip_n(s, n + 1);
     }
-    val body: err[Error] = uri_into(s, suffix, false, mark);
-    if (sel body.err)                      { ret body; }
+    val err_body: err[Error] = uri_into(s, suffix, false, mark);
+    if (sel err_body.err)                  { ret err_body; }
     if (handle.len > 1 && suffix.len == 0) { ret fail(Error.bad_tag{mark}); }
     ret pass();
 }
 
 fun fetch_tag(s: *Scanner) err[Error] {
-    val saved: err[Error] = save_simple_key(s);
-    if (sel saved.err) { ret saved; }
+    val err_saved: err[Error] = save_simple_key(s);
+    if (sel err_saved.err) { ret err_saved; }
     s.allowed = false;
 
-    val mark:   Mark       = here(s);
-    var handle: Buf;
-    var suffix: Buf;
-    val r:      err[Error] = tag_into(s, ?handle, ?suffix, mark);
-    if (sel r.err) {
+    val mark:         Mark       = here(s);
+    var handle:       Buf;
+    var suffix:       Buf;
+    val err_tag_into: err[Error] = tag_into(s, ?handle, ?suffix, mark);
+    if (sel err_tag_into.err) {
         buf_free(s, ?handle);
         buf_free(s, ?suffix);
-        ret r;
+        ret err_tag_into;
     }
     if (!is_blankz_at(s, 0) && !(s.flow > 0 && is_flow_indicator(peek_at(s, 0)))) {
         buf_free(s, ?handle);
@@ -949,25 +949,25 @@ fun fetch_tag(s: *Scanner) err[Error] {
     var t: Token = token_at(TOK_TAG, mark);
     if (handle.len > 0) {
         t.text_len = handle.len;
-        val h: res[*u8, Error] = buf_finish(s, ?handle);
-        if (sel h.err) {
+        val res_buf_finish: res[*u8, Error] = buf_finish(s, ?handle);
+        if (sel res_buf_finish.err) {
             buf_free(s, ?suffix);
-            ret fail(h.err);
+            ret fail(res_buf_finish.err);
         }
-        t.text = h.ok;
+        t.text = res_buf_finish.ok;
     }
     t.text2_len = suffix.len;
-    val x: res[*u8, Error] = buf_finish(s, ?suffix);
-    if (sel x.err) {
+    val res_buf_finish: res[*u8, Error] = buf_finish(s, ?suffix);
+    if (sel res_buf_finish.err) {
         token_free(s.alloc, ?t);
-        ret fail(x.err);
+        ret fail(res_buf_finish.err);
     }
-    t.text2 = x.ok;
+    t.text2 = res_buf_finish.ok;
 
-    val pushed: err[Error] = emit(s, t);
-    if (sel pushed.err) {
+    val err_pushed: err[Error] = emit(s, t);
+    if (sel err_pushed.err) {
         token_free(s.alloc, ?t);
-        ret pushed;
+        ret err_pushed;
     }
     ret pass();
 }
@@ -993,8 +993,8 @@ fun end_of_line(s: *Scanner) bool {
 fun directive_into(s: *Scanner, mark: Mark, name: *Buf, a: *Buf, b: *Buf) err[Error] {
     skip(s);
     for (is_alnum(peek_at(s, 0)) || peek_at(s, 0) == '-' || peek_at(s, 0) == '_') {
-        val put: err[Error] = buf_put(s, name, peek_at(s, 0));
-        if (sel put.err) { ret put; }
+        val err_put: err[Error] = buf_put(s, name, peek_at(s, 0));
+        if (sel err_put.err) { ret err_put; }
         skip(s);
     }
     if (name.len == 0) { ret fail(Error.directive{mark}); }
@@ -1007,8 +1007,8 @@ fun directive_into(s: *Scanner, mark: Mark, name: *Buf, a: *Buf, b: *Buf) err[Er
             val c: u8 = peek_at(s, 0);
             if (c == '.')           { dots = dots + 1; }
             or (c < '0' || c > '9') { ret fail(Error.directive{mark}); }
-            val put: err[Error] = buf_put(s, a, c);
-            if (sel put.err) { ret put; }
+            val err_put: err[Error] = buf_put(s, a, c);
+            if (sel err_put.err) { ret err_put; }
             skip(s);
         }
         if (dots != 1 || a.data[a.len - 1] == '.' || a.data[1] != '.') { ret fail(Error.directive{mark}); }
@@ -1016,17 +1016,17 @@ fun directive_into(s: *Scanner, mark: Mark, name: *Buf, a: *Buf, b: *Buf) err[Er
     or (node.bytes_equal(name.data, name.len, "TAG")) {
         skip_blanks(s);
         if (peek_at(s, 0) != '!') { ret fail(Error.directive{mark}); }
-        val bang: err[Error] = buf_put(s, a, '!');
-        if (sel bang.err) { ret bang; }
+        val err_bang: err[Error] = buf_put(s, a, '!');
+        if (sel err_bang.err) { ret err_bang; }
         skip(s);
         for (is_alnum(peek_at(s, 0)) || peek_at(s, 0) == '-') {
-            val put: err[Error] = buf_put(s, a, peek_at(s, 0));
-            if (sel put.err) { ret put; }
+            val err_put: err[Error] = buf_put(s, a, peek_at(s, 0));
+            if (sel err_put.err) { ret err_put; }
             skip(s);
         }
         if (peek_at(s, 0) == '!') {
-            val close: err[Error] = buf_put(s, a, '!');
-            if (sel close.err) { ret close; }
+            val err_close: err[Error] = buf_put(s, a, '!');
+            if (sel err_close.err) { ret err_close; }
             skip(s);
         }
         or (a.len > 1) {
@@ -1034,8 +1034,8 @@ fun directive_into(s: *Scanner, mark: Mark, name: *Buf, a: *Buf, b: *Buf) err[Er
         }
         if (!is_blank_at(s, 0)) { ret fail(Error.directive{mark}); }
         skip_blanks(s);
-        val prefix: err[Error] = uri_into(s, b, true, mark);
-        if (sel prefix.err)                    { ret prefix; }
+        val err_prefix: err[Error] = uri_into(s, b, true, mark);
+        if (sel err_prefix.err)                { ret err_prefix; }
         if (b.len == 0 || !is_blankz_at(s, 0)) { ret fail(Error.directive{mark}); }
     }
     or {
@@ -1048,62 +1048,62 @@ fun directive_into(s: *Scanner, mark: Mark, name: *Buf, a: *Buf, b: *Buf) err[Er
 }
 
 fun fetch_directive(s: *Scanner) err[Error] {
-    val rolled: err[Error] = unroll_indent(s, -1);
-    if (sel rolled.err) { ret rolled; }
-    val removed: err[Error] = remove_simple_key(s);
-    if (sel removed.err) { ret removed; }
+    val err_rolled: err[Error] = unroll_indent(s, -1);
+    if (sel err_rolled.err) { ret err_rolled; }
+    val err_removed: err[Error] = remove_simple_key(s);
+    if (sel err_removed.err) { ret err_removed; }
     s.allowed = false;
 
-    val mark: Mark       = here(s);
-    var name: Buf;
-    var a:    Buf;
-    var b:    Buf;
-    val r:    err[Error] = directive_into(s, mark, ?name, ?a, ?b);
-    var kind: TokenKind  = TOK_STREAM_END;
-    if (!(sel r.err)) {
+    val mark:               Mark       = here(s);
+    var name:               Buf;
+    var a:                  Buf;
+    var b:                  Buf;
+    val err_directive_into: err[Error] = directive_into(s, mark, ?name, ?a, ?b);
+    var kind:               TokenKind  = TOK_STREAM_END;
+    if (!(sel err_directive_into.err)) {
         if (node.bytes_equal(name.data, name.len, "YAML")) { kind = TOK_VERSION; }
         or (node.bytes_equal(name.data, name.len, "TAG"))  { kind = TOK_TAG_DIRECTIVE; }
     }
     buf_free(s, ?name);
-    if (sel r.err || kind == TOK_STREAM_END) {
+    if (sel err_directive_into.err || kind == TOK_STREAM_END) {
         buf_free(s, ?a);
         buf_free(s, ?b);
-        ret r;
+        ret err_directive_into;
     }
 
     var t: Token = token_at(kind, mark);
     t.text_len = a.len;
-    val first: res[*u8, Error] = buf_finish(s, ?a);
-    if (sel first.err) {
+    val res_first: res[*u8, Error] = buf_finish(s, ?a);
+    if (sel res_first.err) {
         buf_free(s, ?b);
-        ret fail(first.err);
+        ret fail(res_first.err);
     }
-    t.text = first.ok;
+    t.text = res_first.ok;
     if (kind == TOK_TAG_DIRECTIVE) {
         t.text2_len = b.len;
-        val second: res[*u8, Error] = buf_finish(s, ?b);
-        if (sel second.err) {
+        val res_second: res[*u8, Error] = buf_finish(s, ?b);
+        if (sel res_second.err) {
             token_free(s.alloc, ?t);
-            ret fail(second.err);
+            ret fail(res_second.err);
         }
-        t.text2 = second.ok;
+        t.text2 = res_second.ok;
     }
     or {
         buf_free(s, ?b);
     }
-    val pushed: err[Error] = emit(s, t);
-    if (sel pushed.err) {
+    val err_pushed: err[Error] = emit(s, t);
+    if (sel err_pushed.err) {
         token_free(s.alloc, ?t);
-        ret pushed;
+        ret err_pushed;
     }
     ret pass();
 }
 
 fun fetch_doc_indicator(s: *Scanner, kind: TokenKind) err[Error] {
-    val rolled: err[Error] = unroll_indent(s, -1);
-    if (sel rolled.err) { ret rolled; }
-    val removed: err[Error] = remove_simple_key(s);
-    if (sel removed.err) { ret removed; }
+    val err_rolled: err[Error] = unroll_indent(s, -1);
+    if (sel err_rolled.err) { ret err_rolled; }
+    val err_removed: err[Error] = remove_simple_key(s);
+    if (sel err_removed.err) { ret err_removed; }
     s.allowed = false;
     val mark: Mark = here(s);
     skip_n(s, 3);
@@ -1111,13 +1111,13 @@ fun fetch_doc_indicator(s: *Scanner, kind: TokenKind) err[Error] {
 }
 
 fun fetch_flow_start(s: *Scanner, kind: TokenKind) err[Error] {
-    val saved: err[Error] = save_simple_key(s);
-    if (sel saved.err) { ret saved; }
-    val deep: err[Error] = check_depth(s, 1);
-    if (sel deep.err) { ret deep; }
-    var blank:  SimpleKey;
-    val pushed: res[usize, allocator.Error] = vec.push[SimpleKey](?s.keys, blank);
-    if (sel pushed.err) { ret fail(refused(s, pushed.err)); }
+    val err_saved: err[Error] = save_simple_key(s);
+    if (sel err_saved.err) { ret err_saved; }
+    val err_deep: err[Error] = check_depth(s, 1);
+    if (sel err_deep.err) { ret err_deep; }
+    var blank:      SimpleKey;
+    val res_pushed: res[usize, allocator.Error] = vec.push[SimpleKey](?s.keys, blank);
+    if (sel res_pushed.err) { ret fail(refused(s, res_pushed.err)); }
     s.flow    = s.flow + 1;
     s.allowed = true;
     val mark: Mark = here(s);
@@ -1126,8 +1126,8 @@ fun fetch_flow_start(s: *Scanner, kind: TokenKind) err[Error] {
 }
 
 fun fetch_flow_end(s: *Scanner, kind: TokenKind) err[Error] {
-    val removed: err[Error] = remove_simple_key(s);
-    if (sel removed.err) { ret removed; }
+    val err_removed: err[Error] = remove_simple_key(s);
+    if (sel err_removed.err) { ret err_removed; }
     if (s.flow > 0) {
         s.flow = s.flow - 1;
         vec.pop[SimpleKey](?s.keys);
@@ -1139,8 +1139,8 @@ fun fetch_flow_end(s: *Scanner, kind: TokenKind) err[Error] {
 }
 
 fun fetch_flow_entry(s: *Scanner) err[Error] {
-    val removed: err[Error] = remove_simple_key(s);
-    if (sel removed.err) { ret removed; }
+    val err_removed: err[Error] = remove_simple_key(s);
+    if (sel err_removed.err) { ret err_removed; }
     s.allowed = true;
     val mark: Mark = here(s);
     skip(s);
@@ -1151,11 +1151,11 @@ fun fetch_block_entry(s: *Scanner) err[Error] {
     val mark: Mark = here(s);
     if (s.flow == 0) {
         if (!s.allowed) { ret fail(Error.syntax{mark}); }
-        val rolled: err[Error] = roll_indent(s, s.col, 0, TOK_BLOCK_SEQ, mark, true);
-        if (sel rolled.err) { ret rolled; }
+        val err_rolled: err[Error] = roll_indent(s, s.col, 0, TOK_BLOCK_SEQ, mark, true);
+        if (sel err_rolled.err) { ret err_rolled; }
     }
-    val removed: err[Error] = remove_simple_key(s);
-    if (sel removed.err) { ret removed; }
+    val err_removed: err[Error] = remove_simple_key(s);
+    if (sel err_removed.err) { ret err_removed; }
     s.allowed = true;
     skip(s);
     ret emit(s, token_at(TOK_BLOCK_ENTRY, mark));
@@ -1165,11 +1165,11 @@ fun fetch_key(s: *Scanner) err[Error] {
     val mark: Mark = here(s);
     if (s.flow == 0) {
         if (!s.allowed) { ret fail(Error.key{mark}); }
-        val rolled: err[Error] = roll_indent(s, s.col, 0, TOK_BLOCK_MAP, mark, true);
-        if (sel rolled.err) { ret rolled; }
+        val err_rolled: err[Error] = roll_indent(s, s.col, 0, TOK_BLOCK_MAP, mark, true);
+        if (sel err_rolled.err) { ret err_rolled; }
     }
-    val removed: err[Error] = remove_simple_key(s);
-    if (sel removed.err) { ret removed; }
+    val err_removed: err[Error] = remove_simple_key(s);
+    if (sel err_removed.err) { ret err_removed; }
     s.allowed = s.flow == 0;
     skip(s);
     ret emit(s, token_at(TOK_KEY, mark));
@@ -1179,19 +1179,19 @@ fun fetch_value(s: *Scanner) err[Error] {
     val mark: Mark       = here(s);
     val key:  *SimpleKey = ?s.keys.data[s.keys.len - 1];
     if (key.possible) {
-        val at: usize      = queue_index(s, key.number);
-        val k:  err[Error] = emit_at(s, at, token_at(TOK_KEY, key.mark));
-        if (sel k.err) { ret k; }
-        val rolled: err[Error] = roll_indent(s, key.col, key.number, TOK_BLOCK_MAP, key.mark, false);
-        if (sel rolled.err) { ret rolled; }
+        val at:          usize      = queue_index(s, key.number);
+        val err_emit_at: err[Error] = emit_at(s, at, token_at(TOK_KEY, key.mark));
+        if (sel err_emit_at.err) { ret err_emit_at; }
+        val err_rolled: err[Error] = roll_indent(s, key.col, key.number, TOK_BLOCK_MAP, key.mark, false);
+        if (sel err_rolled.err) { ret err_rolled; }
         key.possible = false;
         s.allowed    = false;
     }
     or {
         if (s.flow == 0) {
             if (!s.allowed) { ret fail(Error.key{mark}); }
-            val rolled: err[Error] = roll_indent(s, s.col, 0, TOK_BLOCK_MAP, mark, true);
-            if (sel rolled.err) { ret rolled; }
+            val err_rolled: err[Error] = roll_indent(s, s.col, 0, TOK_BLOCK_MAP, mark, true);
+            if (sel err_rolled.err) { ret err_rolled; }
         }
         s.allowed = s.flow == 0;
     }
@@ -1204,10 +1204,10 @@ fun fetch_stream_end(s: *Scanner) err[Error] {
         s.col  = 0;
         s.line = s.line + 1;
     }
-    val rolled: err[Error] = unroll_indent(s, -1);
-    if (sel rolled.err) { ret rolled; }
-    val removed: err[Error] = remove_simple_key(s);
-    if (sel removed.err) { ret removed; }
+    val err_rolled: err[Error] = unroll_indent(s, -1);
+    if (sel err_rolled.err) { ret err_rolled; }
+    val err_removed: err[Error] = remove_simple_key(s);
+    if (sel err_removed.err) { ret err_removed; }
     s.allowed = false;
     s.done    = true;
     ret emit(s, token_at(TOK_STREAM_END, here(s)));
@@ -1235,14 +1235,14 @@ fun start_stream(s: *Scanner) err[Error] {
 
 fun fetch_next(s: *Scanner) err[Error] {
     if (!s.started) {
-        val begun: err[Error] = start_stream(s);
-        if (sel begun.err) { ret begun; }
+        val err_begun: err[Error] = start_stream(s);
+        if (sel err_begun.err) { ret err_begun; }
     }
     scan_to_next_token(s);
-    val stale: err[Error] = stale_simple_keys(s);
-    if (sel stale.err) { ret stale; }
-    val rolled: err[Error] = unroll_indent(s, s.col::i64);
-    if (sel rolled.err) { ret rolled; }
+    val err_stale: err[Error] = stale_simple_keys(s);
+    if (sel err_stale.err) { ret err_stale; }
+    val err_rolled: err[Error] = unroll_indent(s, s.col::i64);
+    if (sel err_rolled.err) { ret err_rolled; }
 
     if (at_end(s, 0)) { ret fetch_stream_end(s); }
     val c: u8 = peek_at(s, 0);
@@ -1288,13 +1288,13 @@ fun need_more(s: *Scanner) bool {
 pub fun peek(s: *Scanner) res[*Token, Error] {
     for {
         if (!s.done && s.head < s.queue.len) {
-            val stale: err[Error] = stale_simple_keys(s);
-            if (sel stale.err) { ret res[*Token, Error].err{stale.err}; }
+            val err_stale: err[Error] = stale_simple_keys(s);
+            if (sel err_stale.err) { ret res[*Token, Error].err{err_stale.err}; }
         }
         if (s.done || !need_more(s)) { brk; }
-        val fetched: err[Error] = fetch_next(s);
-        if (s.bad)           { ret res[*Token, Error].err{Error.character{s.bad_at}}; }
-        if (sel fetched.err) { ret res[*Token, Error].err{fetched.err}; }
+        val err_fetched: err[Error] = fetch_next(s);
+        if (s.bad)               { ret res[*Token, Error].err{Error.character{s.bad_at}}; }
+        if (sel err_fetched.err) { ret res[*Token, Error].err{err_fetched.err}; }
     }
     ret res[*Token, Error].ok{?s.queue.data[s.head]};
 }
@@ -1335,8 +1335,8 @@ $if (capability.HOSTED) {
             dnit(?s);
         }
         for {
-            val got: res[*Token, Error] = peek(?s);
-            if (sel got.err) { ret false; }
+            val res_peek: res[*Token, Error] = peek(?s);
+            if (sel res_peek.err) { ret false; }
             var t: Token = take(?s);
             if (t.kind == TOK_SCALAR) {
                 @text = t.text;
