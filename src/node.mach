@@ -74,7 +74,7 @@ pub fun own_free(alloc: *allocator.Allocator, p: *u8, len: usize) err[allocator.
 }
 
 # allocate a node of a kind, with no text, tag, anchor or children
-pub fun new_node(alloc: *allocator.Allocator, kind: Kind) res[*Node, allocator.Error] {
+pub fun node_init(alloc: *allocator.Allocator, kind: Kind) res[*Node, allocator.Error] {
     val res_zallocate: res[*Node, allocator.Error] = allocator.zallocate[Node](alloc, 1);
     if (sel res_zallocate.err) { ret res_zallocate; }
     val n: *Node = res_zallocate.ok;
@@ -84,10 +84,10 @@ pub fun new_node(alloc: *allocator.Allocator, kind: Kind) res[*Node, allocator.E
 }
 
 # a scalar holding a copy of len bytes of text
-pub fun make_scalar(alloc: *allocator.Allocator, text: *u8, len: usize, style: Style) res[*Node, allocator.Error] {
+pub fun scalar_init(alloc: *allocator.Allocator, text: *u8, len: usize, style: Style) res[*Node, allocator.Error] {
     val res_copy: res[*u8, allocator.Error] = own_copy(alloc, text, len);
     if (sel res_copy.err) { ret res[*Node, allocator.Error].err{res_copy.err}; }
-    val res_made: res[*Node, allocator.Error] = new_node(alloc, SCALAR);
+    val res_made: res[*Node, allocator.Error] = node_init(alloc, SCALAR);
     if (sel res_made.err) {
         own_free(alloc, res_copy.ok, len);
         ret res_made;
@@ -100,24 +100,24 @@ pub fun make_scalar(alloc: *allocator.Allocator, text: *u8, len: usize, style: S
 }
 
 # an empty sequence
-pub fun make_sequence(alloc: *allocator.Allocator) res[*Node, allocator.Error] {
-    val res_made: res[*Node, allocator.Error] = new_node(alloc, SEQUENCE);
+pub fun sequence_init(alloc: *allocator.Allocator) res[*Node, allocator.Error] {
+    val res_made: res[*Node, allocator.Error] = node_init(alloc, SEQUENCE);
     if (sel res_made.err) { ret res_made; }
     res_made.ok.style = BLOCK;
     ret res_made;
 }
 
 # an empty mapping
-pub fun make_mapping(alloc: *allocator.Allocator) res[*Node, allocator.Error] {
-    val res_made: res[*Node, allocator.Error] = new_node(alloc, MAPPING);
+pub fun mapping_init(alloc: *allocator.Allocator) res[*Node, allocator.Error] {
+    val res_made: res[*Node, allocator.Error] = node_init(alloc, MAPPING);
     if (sel res_made.err) { ret res_made; }
     res_made.ok.style = BLOCK;
     ret res_made;
 }
 
 # an alias of a node, which must carry an anchor for the writer to name
-pub fun make_alias(alloc: *allocator.Allocator, target: *Node) res[*Node, allocator.Error] {
-    val res_made: res[*Node, allocator.Error] = new_node(alloc, ALIAS);
+pub fun alias_init(alloc: *allocator.Allocator, target: *Node) res[*Node, allocator.Error] {
+    val res_made: res[*Node, allocator.Error] = node_init(alloc, ALIAS);
     if (sel res_made.err) { ret res_made; }
     res_made.ok.target = target;
     res_made.ok.weight = target.weight;

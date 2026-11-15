@@ -223,7 +223,7 @@ $if (capability.HOSTED) {
 
         var i: usize = 0;
         for (i < 52) {
-            val res_made: res[*Node, allocator.Error] = node.make_scalar(?a, rows[i].text, str_len(rows[i].text), rows[i].style);
+            val res_made: res[*Node, allocator.Error] = node.scalar_init(?a, rows[i].text, str_len(rows[i].text), rows[i].style);
             if (sel res_made.err) { ret 1; }
             val n: *Node = res_made.ok;
             if (str_len(rows[i].tag) > 0) { node.set_tag(?a, n, rows[i].tag); }

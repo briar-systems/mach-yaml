@@ -97,7 +97,7 @@ pub fun parse_with(src: *u8, src_len: usize, alloc: *allocator.Allocator, limits
     or {
         err_parse_stream = parse_stream(?p, ?stream);
     }
-    release(?p);
+    parser_dnit(?p);
     if (sel err_parse_stream.err) {
         dnit(?stream);
         ret res[Stream, Error].err{err_parse_stream.err};
@@ -105,7 +105,7 @@ pub fun parse_with(src: *u8, src_len: usize, alloc: *allocator.Allocator, limits
     ret res[Stream, Error].ok{stream};
 }
 
-fun release(p: *Parser) {
+fun parser_dnit(p: *Parser) {
     scan.dnit(?p.sc);
     forget_tags(p);
     vec.dnit[TagDirective](?p.tags);
@@ -175,7 +175,7 @@ fun forget_tags(p: *Parser) {
     p.tags.len = 0;
 }
 
-fun props_free(p: *Parser, props: *Props) {
+fun props_dnit(p: *Parser, props: *Props) {
     node.own_free(p.alloc, props.anchor, props.anchor_len);
     node.own_free(p.alloc, props.handle, props.handle_len);
     node.own_free(p.alloc, props.suffix, props.suffix_len);
@@ -204,7 +204,7 @@ fun place(n: *Node, at: Mark) {
 }
 
 fun empty_scalar(p: *Parser, at: Mark) res[*Node, Error] {
-    val res_made: res[*Node, allocator.Error] = node.make_scalar(p.alloc, "", 0, node.PLAIN);
+    val res_made: res[*Node, allocator.Error] = node.scalar_init(p.alloc, "", 0, node.PLAIN);
     if (sel res_made.err) { ret res[*Node, Error].err{refused(p, res_made.err, at)}; }
     place(res_made.ok, at);
     ret res[*Node, Error].ok{res_made.ok};
@@ -235,7 +235,7 @@ fun parse_stream(p: *Parser, stream: *Stream) err[Error] {
 
 fun add_directive(p: *Parser, t: Token, have_version: *bool) err[Error] {
     if (t.kind == scan.TOK_VERSION) {
-        scan.token_free(p.alloc, ?t);
+        scan.token_dnit(p.alloc, ?t);
         if (@have_version) { ret fail(Error.directive{t.mark}); }
         @have_version = true;
         ret pass();
@@ -244,7 +244,7 @@ fun add_directive(p: *Parser, t: Token, have_version: *bool) err[Error] {
     var i: usize = 0;
     for (i < p.tags.len) {
         if (node.bytes_equal(p.tags.data[i].handle, p.tags.data[i].handle_len, t.text)) {
-            scan.token_free(p.alloc, ?t);
+            scan.token_dnit(p.alloc, ?t);
             ret fail(Error.directive{t.mark});
         }
         i = i + 1;
@@ -256,7 +256,7 @@ fun add_directive(p: *Parser, t: Token, have_version: *bool) err[Error] {
     d.prefix_len = t.text2_len;
     val res_pushed: res[usize, allocator.Error] = vec.push[TagDirective](?p.tags, d);
     if (sel res_pushed.err) {
-        scan.token_free(p.alloc, ?t);
+        scan.token_dnit(p.alloc, ?t);
         ret fail(refused(p, res_pushed.err, t.mark));
     }
     ret pass();
@@ -374,7 +374,7 @@ fun register(p: *Parser, n: *Node, at: Mark) err[Error] {
 fun parse_node(p: *Parser, block: bool, indentless: bool, depth: usize) res[*Node, Error] {
     var props:               Props;
     val res_parse_node_with: res[*Node, Error] = parse_node_with(p, ?props, block, indentless, depth);
-    props_free(p, ?props);
+    props_dnit(p, ?props);
     ret res_parse_node_with;
 }
 
@@ -393,7 +393,7 @@ fun parse_node_with(p: *Parser, props: *Props, block: bool, indentless: bool, de
         var tok: Token = scan.take(?p.sc);
         if (t.kind == scan.TOK_ANCHOR) {
             if (props.has_anchor) {
-                scan.token_free(p.alloc, ?tok);
+                scan.token_dnit(p.alloc, ?tok);
                 ret res[*Node, Error].err{Error.syntax{t.mark}};
             }
             props.has_anchor = true;
@@ -402,7 +402,7 @@ fun parse_node_with(p: *Parser, props: *Props, block: bool, indentless: bool, de
         }
         or {
             if (props.has_tag) {
-                scan.token_free(p.alloc, ?tok);
+                scan.token_dnit(p.alloc, ?tok);
                 ret res[*Node, Error].err{Error.syntax{t.mark}};
             }
             props.has_tag    = true;
@@ -472,14 +472,14 @@ fun parse_node_with(p: *Parser, props: *Props, block: bool, indentless: bool, de
 fun parse_alias(p: *Parser) res[*Node, Error] {
     var tok:       Token      = scan.take(?p.sc);
     val opt_found: opt[*Node] = alias_target(p, ?tok);
-    scan.token_free(p.alloc, ?tok);
+    scan.token_dnit(p.alloc, ?tok);
     if (!sel opt_found.some) { ret res[*Node, Error].err{Error.alias{tok.mark}}; }
 
     val target: *Node = opt_found.some;
     p.expanded = sat_add(p.expanded, target.weight);
     if (p.expanded > p.limits.max_expansion) { ret res[*Node, Error].err{Error.expansion{tok.mark}}; }
 
-    val res_made: res[*Node, allocator.Error] = node.make_alias(p.alloc, target);
+    val res_made: res[*Node, allocator.Error] = node.alias_init(p.alloc, target);
     if (sel res_made.err) { ret res[*Node, Error].err{refused(p, res_made.err, tok.mark)}; }
     place(res_made.ok, tok.mark);
     ret res[*Node, Error].ok{res_made.ok};
@@ -494,9 +494,9 @@ fun alias_target(p: *Parser, tok: *Token) opt[*Node] {
 
 fun parse_scalar(p: *Parser) res[*Node, Error] {
     var tok:      Token                       = scan.take(?p.sc);
-    val res_made: res[*Node, allocator.Error] = node.new_node(p.alloc, node.SCALAR);
+    val res_made: res[*Node, allocator.Error] = node.node_init(p.alloc, node.SCALAR);
     if (sel res_made.err) {
-        scan.token_free(p.alloc, ?tok);
+        scan.token_dnit(p.alloc, ?tok);
         ret res[*Node, Error].err{refused(p, res_made.err, tok.mark)};
     }
     val n: *Node = res_made.ok;
@@ -510,9 +510,9 @@ fun is_collection_end(k: scan.TokenKind) bool {
     ret k == scan.TOK_KEY || k == scan.TOK_VALUE || k == scan.TOK_BLOCK_END;
 }
 
-fun new_collection(p: *Parser, kind: node.Kind, style: node.Style, at: Mark, depth: usize) res[*Node, Error] {
+fun collection_init(p: *Parser, kind: node.Kind, style: node.Style, at: Mark, depth: usize) res[*Node, Error] {
     if (depth + 1 > p.limits.max_depth) { ret res[*Node, Error].err{Error.depth{at}}; }
-    val res_made: res[*Node, allocator.Error] = node.new_node(p.alloc, kind);
+    val res_made: res[*Node, allocator.Error] = node.node_init(p.alloc, kind);
     if (sel res_made.err) { ret res[*Node, Error].err{refused(p, res_made.err, at)}; }
     res_made.ok.style = style;
     ret res[*Node, Error].ok{res_made.ok};
@@ -630,7 +630,7 @@ fun ends_flow_value(k: scan.TokenKind) bool {
 
 fun parse_block_seq(p: *Parser, depth: usize) res[*Node, Error] {
     val start:    Token             = scan.take(?p.sc);
-    val res_made: res[*Node, Error] = new_collection(p, node.SEQUENCE, node.BLOCK, start.mark, depth);
+    val res_made: res[*Node, Error] = collection_init(p, node.SEQUENCE, node.BLOCK, start.mark, depth);
     if (sel res_made.err) { ret res_made; }
     val seq: *Node = res_made.ok;
 
@@ -669,7 +669,7 @@ fun parse_block_seq(p: *Parser, depth: usize) res[*Node, Error] {
 fun parse_indentless_seq(p: *Parser, depth: usize) res[*Node, Error] {
     val res_first: res[Token, Error] = peek_token(p);
     if (sel res_first.err) { ret res[*Node, Error].err{res_first.err}; }
-    val res_made: res[*Node, Error] = new_collection(p, node.SEQUENCE, node.BLOCK, res_first.ok.mark, depth);
+    val res_made: res[*Node, Error] = collection_init(p, node.SEQUENCE, node.BLOCK, res_first.ok.mark, depth);
     if (sel res_made.err) { ret res_made; }
     val seq: *Node = res_made.ok;
 
@@ -698,7 +698,7 @@ fun parse_indentless_seq(p: *Parser, depth: usize) res[*Node, Error] {
 
 fun parse_block_map(p: *Parser, depth: usize) res[*Node, Error] {
     val start:    Token             = scan.take(?p.sc);
-    val res_made: res[*Node, Error] = new_collection(p, node.MAPPING, node.BLOCK, start.mark, depth);
+    val res_made: res[*Node, Error] = collection_init(p, node.MAPPING, node.BLOCK, start.mark, depth);
     if (sel res_made.err) { ret res_made; }
     val map_node: *Node = res_made.ok;
 
@@ -806,7 +806,7 @@ fun parse_flow_pair(p: *Parser, t: Token, depth: usize, pair: *Node) err[Error] 
 
 fun parse_flow_seq(p: *Parser, depth: usize) res[*Node, Error] {
     val start:    Token             = scan.take(?p.sc);
-    val res_made: res[*Node, Error] = new_collection(p, node.SEQUENCE, node.FLOW, start.mark, depth);
+    val res_made: res[*Node, Error] = collection_init(p, node.SEQUENCE, node.FLOW, start.mark, depth);
     if (sel res_made.err) { ret res_made; }
     val seq: *Node = res_made.ok;
 
@@ -842,7 +842,7 @@ fun parse_flow_seq(p: *Parser, depth: usize) res[*Node, Error] {
         first = false;
 
         if (t.kind == scan.TOK_KEY) {
-            val res_new_collection: res[*Node, Error] = new_collection(p, node.MAPPING, node.FLOW, t.mark, depth + 1);
+            val res_new_collection: res[*Node, Error] = collection_init(p, node.MAPPING, node.FLOW, t.mark, depth + 1);
             if (sel res_new_collection.err) {
                 node.dnit(p.alloc, seq);
                 ret res_new_collection;
@@ -881,7 +881,7 @@ fun parse_flow_seq(p: *Parser, depth: usize) res[*Node, Error] {
 
 fun parse_flow_map(p: *Parser, depth: usize) res[*Node, Error] {
     val start:    Token             = scan.take(?p.sc);
-    val res_made: res[*Node, Error] = new_collection(p, node.MAPPING, node.FLOW, start.mark, depth);
+    val res_made: res[*Node, Error] = collection_init(p, node.MAPPING, node.FLOW, start.mark, depth);
     if (sel res_made.err) { ret res_made; }
     val map_node: *Node = res_made.ok;
 

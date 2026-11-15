@@ -127,7 +127,7 @@ pub fun dnit(s: *Scanner) err[allocator.Error] {
 
     var i: usize = 0;
     for (i < s.queue.len) {
-        val err_freed: err[allocator.Error] = token_free(s.alloc, ?s.queue.data[i]);
+        val err_freed: err[allocator.Error] = token_dnit(s.alloc, ?s.queue.data[i]);
         if (sel err_freed.err) {
             if (!failed) {
                 failed = true;
@@ -162,7 +162,7 @@ pub fun dnit(s: *Scanner) err[allocator.Error] {
 }
 
 # release the strings a token still owns
-pub fun token_free(alloc: *allocator.Allocator, t: *Token) err[allocator.Error] {
+pub fun token_dnit(alloc: *allocator.Allocator, t: *Token) err[allocator.Error] {
     val err_own_free:       err[allocator.Error] = node.own_free(alloc, t.text, t.text_len);
     val err_own_free_alloc: err[allocator.Error] = node.own_free(alloc, t.text2, t.text2_len);
     t.text      = nil;
@@ -335,7 +335,7 @@ fun buf_put_src(s: *Scanner, b: *Buf, start: usize, len: usize) err[Error] {
     ret pass();
 }
 
-fun buf_free(s: *Scanner, b: *Buf) {
+fun buf_dnit(s: *Scanner, b: *Buf) {
     allocator.deallocate[u8](s.alloc, b.data, b.cap);
     b.data = nil;
     b.len  = 0;
@@ -353,7 +353,7 @@ fun buf_finish(s: *Scanner, b: *Buf) res[*u8, Error] {
     or {
         val res_reallocate: res[*u8, allocator.Error] = allocator.reallocate[u8](s.alloc, b.data, b.cap, b.len + 1);
         if (sel res_reallocate.err) {
-            buf_free(s, b);
+            buf_dnit(s, b);
             ret res[*u8, Error].err{refused(s, res_reallocate.err)};
         }
         out = res_reallocate.ok;
@@ -571,7 +571,7 @@ fun fetch_plain(s: *Scanner) err[Error] {
     var crossed:        bool       = false;
     val err_plain_into: err[Error] = plain_into(s, ?b, ?crossed);
     if (sel err_plain_into.err) {
-        buf_free(s, ?b);
+        buf_dnit(s, ?b);
         ret err_plain_into;
     }
     if (crossed) { s.allowed = true; }
@@ -692,7 +692,7 @@ fun fetch_quoted(s: *Scanner, single: bool) err[Error] {
     var b:               Buf;
     val err_quoted_into: err[Error] = quoted_into(s, ?b, single, mark);
     if (sel err_quoted_into.err) {
-        buf_free(s, ?b);
+        buf_dnit(s, ?b);
         ret err_quoted_into;
     }
     var style: Style = node.DOUBLE;
@@ -825,7 +825,7 @@ fun fetch_block_scalar(s: *Scanner, literal: bool) err[Error] {
     var b:              Buf;
     val err_block_into: err[Error] = block_into(s, ?b, literal);
     if (sel err_block_into.err) {
-        buf_free(s, ?b);
+        buf_dnit(s, ?b);
         ret err_block_into;
     }
     var style: Style = node.FOLDED;
@@ -849,12 +849,12 @@ fun fetch_anchor(s: *Scanner, kind: TokenKind) err[Error] {
     for (!is_name_stop(s)) {
         val c: u8 = peek_at(s, 0);
         if (!printable(c)) {
-            buf_free(s, ?b);
+            buf_dnit(s, ?b);
             ret fail(Error.character{here(s)});
         }
         val err_put: err[Error] = buf_put(s, ?b, c);
         if (sel err_put.err) {
-            buf_free(s, ?b);
+            buf_dnit(s, ?b);
             ret err_put;
         }
         skip(s);
@@ -936,13 +936,13 @@ fun fetch_tag(s: *Scanner) err[Error] {
     var suffix:       Buf;
     val err_tag_into: err[Error] = tag_into(s, ?handle, ?suffix, mark);
     if (sel err_tag_into.err) {
-        buf_free(s, ?handle);
-        buf_free(s, ?suffix);
+        buf_dnit(s, ?handle);
+        buf_dnit(s, ?suffix);
         ret err_tag_into;
     }
     if (!is_blankz_at(s, 0) && !(s.flow > 0 && is_flow_indicator(peek_at(s, 0)))) {
-        buf_free(s, ?handle);
-        buf_free(s, ?suffix);
+        buf_dnit(s, ?handle);
+        buf_dnit(s, ?suffix);
         ret fail(Error.bad_tag{mark});
     }
 
@@ -951,7 +951,7 @@ fun fetch_tag(s: *Scanner) err[Error] {
         t.text_len = handle.len;
         val res_buf_finish: res[*u8, Error] = buf_finish(s, ?handle);
         if (sel res_buf_finish.err) {
-            buf_free(s, ?suffix);
+            buf_dnit(s, ?suffix);
             ret fail(res_buf_finish.err);
         }
         t.text = res_buf_finish.ok;
@@ -959,14 +959,14 @@ fun fetch_tag(s: *Scanner) err[Error] {
     t.text2_len = suffix.len;
     val res_buf_finish: res[*u8, Error] = buf_finish(s, ?suffix);
     if (sel res_buf_finish.err) {
-        token_free(s.alloc, ?t);
+        token_dnit(s.alloc, ?t);
         ret fail(res_buf_finish.err);
     }
     t.text2 = res_buf_finish.ok;
 
     val err_pushed: err[Error] = emit(s, t);
     if (sel err_pushed.err) {
-        token_free(s.alloc, ?t);
+        token_dnit(s.alloc, ?t);
         ret err_pushed;
     }
     ret pass();
@@ -1064,10 +1064,10 @@ fun fetch_directive(s: *Scanner) err[Error] {
         if (node.bytes_equal(name.data, name.len, "YAML")) { kind = TOK_VERSION; }
         or (node.bytes_equal(name.data, name.len, "TAG"))  { kind = TOK_TAG_DIRECTIVE; }
     }
-    buf_free(s, ?name);
+    buf_dnit(s, ?name);
     if (sel err_directive_into.err || kind == TOK_STREAM_END) {
-        buf_free(s, ?a);
-        buf_free(s, ?b);
+        buf_dnit(s, ?a);
+        buf_dnit(s, ?b);
         ret err_directive_into;
     }
 
@@ -1075,7 +1075,7 @@ fun fetch_directive(s: *Scanner) err[Error] {
     t.text_len = a.len;
     val res_first: res[*u8, Error] = buf_finish(s, ?a);
     if (sel res_first.err) {
-        buf_free(s, ?b);
+        buf_dnit(s, ?b);
         ret fail(res_first.err);
     }
     t.text = res_first.ok;
@@ -1083,17 +1083,17 @@ fun fetch_directive(s: *Scanner) err[Error] {
         t.text2_len = b.len;
         val res_second: res[*u8, Error] = buf_finish(s, ?b);
         if (sel res_second.err) {
-            token_free(s.alloc, ?t);
+            token_dnit(s.alloc, ?t);
             ret fail(res_second.err);
         }
         t.text2 = res_second.ok;
     }
     or {
-        buf_free(s, ?b);
+        buf_dnit(s, ?b);
     }
     val err_pushed: err[Error] = emit(s, t);
     if (sel err_pushed.err) {
-        token_free(s.alloc, ?t);
+        token_dnit(s.alloc, ?t);
         ret err_pushed;
     }
     ret pass();
@@ -1343,7 +1343,7 @@ $if (capability.HOSTED) {
                 @len  = t.text_len;
                 ret true;
             }
-            token_free(a, ?t);
+            token_dnit(a, ?t);
             if (t.kind == TOK_STREAM_END) { ret false; }
         }
         ret false;
