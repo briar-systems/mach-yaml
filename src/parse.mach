@@ -956,6 +956,7 @@ fun parse_flow_map(p: *Parser, depth: usize) res[*Node, Error] {
 
 $if (capability.HOSTED) {
     use std.allocator.page;
+    use std.allocator.testing;
     use std.print;
     use std.types.string.str_len;
 
@@ -1238,5 +1239,60 @@ $if (capability.HOSTED) {
         dnit(?s);
         if (weight != 1 + 4 + 10 + 91 + 820 + 7381) { ret 5; }
         ret 0;
+    }
+
+    # each acquisition refused in turn, over a stream with a tag directive, tags,
+    # an anchor and its alias, an escaped scalar, a sequence past its first
+    # capacity, a flow and a block mapping and two documents: the read reports
+    # the allocator's refusal, nothing is stranded, and the stream released
+    # afterwards balances
+    test parse__refused_acquisition_strands_nothing {
+        val src: str   = "%TAG !e! tag:e.com,2000:\n--- !e!t\na: &x [1, 2, 3, 4, 5, 6]\nb: *x\nc: \"q\\tz\"\nd: {k: v, j: w}\n---\n- one\n- two\n";
+        val n:   usize = str_len(src);
+
+        var ordinal: usize = 1;
+        for (ordinal <= 512) {
+            var tracker:  testing.Testing;
+            val err_made: err[allocator.Error] = testing.init(?tracker);
+            if (sel err_made.err) { ret 1; }
+            testing.fail_at_ordinal(?tracker, ordinal);
+            val a: *allocator.Allocator = testing.allocator_of(?tracker);
+
+            val res_parse: res[Stream, Error] = parse(src, n, a);
+            var accepted:  bool               = false;
+            if (sel res_parse.err) {
+                if (!sel res_parse.err.alloc) {
+                    testing.dnit(?tracker);
+                    ret 2;
+                }
+                val cause: allocator.Error = res_parse.err.alloc.cause;
+                if (!sel cause.exhausted) {
+                    testing.dnit(?tracker);
+                    ret 3;
+                }
+            }
+            if (sel res_parse.ok) {
+                var s: Stream = res_parse.ok;
+                accepted = true;
+                val err_released: err[allocator.Error] = dnit(?s);
+                if (sel err_released.err) {
+                    testing.dnit(?tracker);
+                    ret 4;
+                }
+            }
+            val leaked:   bool  = testing.live_count(?tracker) != 0 || testing.double_free_count(?tracker) != 0;
+            val attempts: usize = testing.attempt_count(?tracker);
+            testing.dnit(?tracker);
+            if (leaked) { ret 5; }
+            if (accepted) {
+                # the refusal never fired: every acquisition succeeded before it
+                if (attempts >= ordinal) { ret 6; }
+                if (ordinal < 16)        { ret 7; }
+                ret 0;
+            }
+            if (attempts != ordinal) { ret 8; }
+            ordinal = ordinal + 1;
+        }
+        ret 9;
     }
 }
