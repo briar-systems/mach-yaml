@@ -37,29 +37,32 @@ use std.allocator;
 use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
-use yaml;
+use yaml.error;
+use yaml.node;
+use yaml.parse;
+use yaml.schema;
 
 # the tbd-version of the first document of a text stub, or -1
 fun tbd_version(a: *allocator.Allocator, text: *u8, len: usize) i64 {
-    val read: res[yaml.parse.Stream, yaml.error.Error] = yaml.parse.parse(text, len, a);
+    val read: res[parse.Stream, error.Error] = parse.parse(text, len, a);
     if (sel read.err) {
-        val at: yaml.error.Mark = yaml.error.error_mark(read.err);
+        val at: error.Mark = error.error_mark(read.err);
         # at.line and at.column are 1-based
         ret -1;
     }
-    var stream: yaml.parse.Stream = read.ok;
+    var stream: parse.Stream = read.ok;
     fin {
-        yaml.parse.dnit(?stream);
+        parse.dnit(?stream);
     }
 
-    val doc: opt[*yaml.parse.Document] = yaml.parse.stream_get(?stream, 0);
+    val doc: opt[*parse.Document] = parse.stream_get(?stream, 0);
     if (!sel doc.some) { ret -1; }
-    val root: *yaml.node.Node = yaml.parse.document_root(doc.some);
-    if (!yaml.node.node_tag_is(root, "!tapi-tbd")) { ret -1; }
+    val root: *node.Node = parse.document_root(doc.some);
+    if (!node.node_tag_is(root, "!tapi-tbd")) { ret -1; }
 
-    val version: opt[*yaml.node.Node] = yaml.node.node_find(root, "tbd-version");
+    val version: opt[*node.Node] = node.node_find(root, "tbd-version");
     if (!sel version.some) { ret -1; }
-    val n: opt[i64] = yaml.schema.node_int(version.some);
+    val n: opt[i64] = schema.node_int(version.some);
     if (!sel n.some) { ret -1; }
     ret n.some;
 }

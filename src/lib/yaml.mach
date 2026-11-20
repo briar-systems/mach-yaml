@@ -1,4 +1,4 @@
-# the yaml library, what a dependent's `use yaml;` binds
+# the yaml library, the modules its prebuilt artifact carries
 #
 # a YAML 1.2 reader and writer
 
