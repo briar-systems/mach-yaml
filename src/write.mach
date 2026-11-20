@@ -517,7 +517,7 @@ $if (capability.HOSTED) {
     #[testing]
     fun sink_writer(s: *Sink) writer.Writer {
         s.len = 0;
-        ret writer.Writer{ctx: s::ptr, f_write: sink_write};
+        ret writer.Writer{ctx: s::ptr, fn_write: sink_write};
     }
 
     # a tree with every kind of node, written and read back to an equal tree
