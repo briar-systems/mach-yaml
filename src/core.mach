@@ -1,0 +1,127 @@
+# how a plain scalar reads under the core schema, by its text
+
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+use std.types.string.str;
+
+pub def Core: u8;
+pub val NULL:  Core = 0;
+pub val BOOL:  Core = 1;
+pub val INT:   Core = 2;
+pub val FLOAT: Core = 3;
+pub val STR:   Core = 4;
+pub val OTHER: Core = 5;
+
+fun same_text(a: *u8, len: usize, b: str) bool {
+    var i: usize = 0;
+    for (i < len) {
+        if (b[i] == 0 || a[i] != b[i]) { ret false; }
+        i = i + 1;
+    }
+    ret b[len] == 0;
+}
+
+pub fun is_digit(c: u8) bool {
+    ret c >= '0' && c <= '9';
+}
+
+pub fun is_hex(c: u8) bool {
+    ret is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+pub fun text_is(text: *u8, len: usize, a: str, b: str, c: str) bool {
+    ret same_text(text, len, a) || same_text(text, len, b) || same_text(text, len, c);
+}
+
+pub fun null_text(text: *u8, len: usize) bool {
+    ret len == 0 || same_text(text, len, "~") || text_is(text, len, "null", "Null", "NULL");
+}
+
+# 1 for true, 0 for false, -1 for neither
+pub fun bool_text(text: *u8, len: usize) i32 {
+    if (text_is(text, len, "true", "True", "TRUE"))    { ret 1; }
+    if (text_is(text, len, "false", "False", "FALSE")) { ret 0; }
+    ret -1;
+}
+
+# the number of leading sign bytes
+pub fun sign_len(text: *u8, len: usize) usize {
+    if (len > 0 && (text[0] == '-' || text[0] == '+')) { ret 1; }
+    ret 0;
+}
+
+pub fun all_digits(text: *u8, from: usize, len: usize, hex: bool, octal: bool) bool {
+    if (from >= len) { ret false; }
+    var i: usize = from;
+    for (i < len) {
+        val c: u8 = text[i];
+        if (hex) {
+            if (!is_hex(c)) { ret false; }
+        }
+        or (octal) {
+            if (c < '0' || c > '7') { ret false; }
+        }
+        or {
+            if (!is_digit(c)) { ret false; }
+        }
+        i = i + 1;
+    }
+    ret true;
+}
+
+pub fun int_text(text: *u8, len: usize) bool {
+    if (len > 2 && text[0] == '0' && text[1] == 'x') { ret all_digits(text, 2, len, true, false); }
+    if (len > 2 && text[0] == '0' && text[1] == 'o') { ret all_digits(text, 2, len, false, true); }
+    ret all_digits(text, sign_len(text, len), len, false, false);
+}
+
+pub fun special_float(text: *u8, len: usize) i32 {
+    val at: usize = sign_len(text, len);
+    if (len - at == 4 && text[at] == '.') {
+        val body: *u8 = (text::usize + at + 1)::*u8;
+        if (text_is(body, 3, "inf", "Inf", "INF"))            { ret 1; }
+        if (at == 0 && text_is(body, 3, "nan", "NaN", "NAN")) { ret 2; }
+    }
+    ret 0;
+}
+
+pub fun float_text(text: *u8, len: usize) bool {
+    if (special_float(text, len) != 0) { ret true; }
+    var i:      usize = sign_len(text, len);
+    var digits: usize = 0;
+    for (i < len && is_digit(text[i])) {
+        i      = i + 1;
+        digits = digits + 1;
+    }
+    var fraction: usize = 0;
+    if (i < len && text[i] == '.') {
+        i = i + 1;
+        for (i < len && is_digit(text[i])) {
+            i        = i + 1;
+            fraction = fraction + 1;
+        }
+    }
+    if (digits == 0 && fraction == 0) { ret false; }
+    if (i < len && (text[i] == 'e' || text[i] == 'E')) {
+        i = i + 1;
+        if (i < len && (text[i] == '-' || text[i] == '+')) { i = i + 1; }
+        var exp: usize = 0;
+        for (i < len && is_digit(text[i])) {
+            i   = i + 1;
+            exp = exp + 1;
+        }
+        if (exp == 0) { ret false; }
+    }
+    ret i == len;
+}
+
+# how the core schema reads an untagged plain scalar of this text
+pub fun plain_kind(text: *u8, len: usize) Core {
+    if (null_text(text, len))      { ret NULL; }
+    if (bool_text(text, len) >= 0) { ret BOOL; }
+    if (int_text(text, len))       { ret INT; }
+    if (float_text(text, len))     { ret FLOAT; }
+    ret STR;
+}
